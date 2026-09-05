@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Chores{% endblock %}
+{% block content %}
+<h1>{{ household.name }} — Chores</h1>
+
+<p><a href="{% url 'chore_create' %}">New chore</a> | <a href="{% url 'chore_archive' %}">Archive</a></p>
+
+<ul>
+{% for chore in chores %}
+    <li>
+        <strong>{{ chore.name }}</strong> — {{ chore.points }} pts — due {{ chore.due_date }}
+        ({{ chore.get_status_display }}{% if chore.is_recurring %}, recurring{% endif %})
+        {% if chore.description %}<br>{{ chore.description }}{% endif %}
+        <br>
+        <a href="{% url 'chore_edit' chore.id %}">Edit</a>
+        <form method="post" action="{% url 'chore_delete' chore.id %}" style="display:inline">
+            {% csrf_token %}
+            <button type="submit">Delete</button>
+        </form>
+    </li>
+{% empty %}
+    <li>No chores yet.</li>
+{% endfor %}
+</ul>
+{% endblock %}

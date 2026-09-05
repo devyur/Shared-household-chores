@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Chore archive{% endblock %}
+{% block content %}
+<h1>Chore archive</h1>
+<p><a href="{% url 'chore_list' %}">Back to chores</a></p>
+
+<ul>
+{% for chore in chores %}
+    <li>
+        <strong>{{ chore.name }}</strong> — {{ chore.points }} pts — was due {{ chore.due_date }}
+        — deleted {{ chore.deleted_at }}
+    </li>
+{% empty %}
+    <li>No deleted chores.</li>
+{% endfor %}
+</ul>
+{% endblock %}

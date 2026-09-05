@@ -305,6 +305,156 @@ class RemoveMemberViewTests(TestCase):
         self.assertTrue(owner_membership.is_active)
 
 
+class ChoreCreateViewTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def test_any_member_can_create_a_chore_and_it_is_logged(self):
+        self.client.force_login(self.bob)
+
+        response = self.client.post(
+            reverse("chore_create"),
+            {
+                "name": "Clean kitchen",
+                "description": "Wipe counters and sweep",
+                "points": 20,
+                "due_date": timezone.localdate(),
+                "is_recurring": False,
+            },
+            follow=True,
+        )
+
+        chore = Chore.objects.get(household=self.household, name="Clean kitchen")
+        self.assertEqual(chore.created_by, self.bob)
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+        self.assertRedirects(response, reverse("chore_list"))
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_CREATED,
+                chore=chore,
+            ).exists()
+        )
+
+    def test_user_without_membership_is_redirected(self):
+        carol = create_user("carol")
+        self.client.force_login(carol)
+
+        response = self.client.post(
+            reverse("chore_create"),
+            {
+                "name": "Clean kitchen",
+                "points": 20,
+                "due_date": timezone.localdate(),
+            },
+        )
+
+        self.assertRedirects(
+            response, reverse("home"), fetch_redirect_response=False
+        )
+        self.assertFalse(Chore.objects.filter(name="Clean kitchen").exists())
+
+
+class ChoreEditViewTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        Claim.objects.create(chore=self.chore, member=self.bob)
+
+    def test_any_member_can_edit_without_disturbing_claim_or_assignment(self):
+        self.client.force_login(self.bob)
+
+        response = self.client.post(
+            reverse("chore_edit", args=[self.chore.id]),
+            {
+                "name": "Deep clean kitchen",
+                "points": 30,
+                "due_date": self.chore.due_date,
+                "is_recurring": False,
+            },
+            follow=True,
+        )
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.name, "Deep clean kitchen")
+        self.assertEqual(self.chore.points, 30)
+        self.assertEqual(self.chore.status, Chore.Status.ASSIGNED)
+        self.assertEqual(self.chore.assigned_to, self.bob)
+        self.assertTrue(Claim.objects.filter(chore=self.chore, member=self.bob).exists())
+        self.assertRedirects(response, reverse("chore_list"))
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_EDITED,
+                chore=self.chore,
+            ).exists()
+        )
+
+    def test_deleted_chore_cannot_be_edited(self):
+        self.chore.deleted_at = timezone.now()
+        self.chore.save()
+        self.client.force_login(self.bob)
+
+        response = self.client.get(reverse("chore_edit", args=[self.chore.id]))
+
+        self.assertEqual(response.status_code, 404)
+
+
+class ChoreDeleteViewTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+        )
+
+    def test_any_member_can_soft_delete_and_it_is_logged(self):
+        self.client.force_login(self.bob)
+
+        response = self.client.post(
+            reverse("chore_delete", args=[self.chore.id]), follow=True
+        )
+
+        self.chore.refresh_from_db()
+        self.assertTrue(self.chore.is_deleted)
+        self.assertRedirects(response, reverse("chore_list"))
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_DELETED,
+                chore=self.chore,
+            ).exists()
+        )
+
+    def test_deleted_chore_disappears_from_list_but_stays_in_archive(self):
+        self.client.force_login(self.bob)
+        self.client.post(reverse("chore_delete", args=[self.chore.id]))
+
+        list_response = self.client.get(reverse("chore_list"))
+        archive_response = self.client.get(reverse("chore_archive"))
+
+        self.assertNotContains(list_response, "<strong>Clean kitchen</strong>")
+        self.assertContains(archive_response, "<strong>Clean kitchen</strong>")
+
+
 class RegenerateInviteViewTests(TestCase):
     def setUp(self):
         self.alice = create_user("alice")

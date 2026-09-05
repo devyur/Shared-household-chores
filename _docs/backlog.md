@@ -21,10 +21,10 @@ Design choice carried over from `_docs/claud-suggestions.md`: due-date-triggered
 - [ ] Owner can remove a member; removed member's points/history stay, their active claims/assignments free up (§2, §16)
 
 ## 3. Chore CRUD
-- [ ] List/create/edit/delete views (or DRF endpoints) for chores, open to all members (§3, §17.1)
-- [ ] Edits apply immediately without cancelling existing claims/assignment (§3)
-- [ ] Soft-delete chores into an archive/history view instead of hard delete (§3, §13)
-- [ ] Log every create/edit/delete to `ActivityLog`
+- [x] List/create/edit/delete views (or DRF endpoints) for chores, open to all members (§3, §17.1)
+- [x] Edits apply immediately without cancelling existing claims/assignment (§3)
+- [x] Soft-delete chores into an archive/history view instead of hard delete (§3, §13)
+- [x] Log every create/edit/delete to `ActivityLog`
 
 ## 4. Recurring chores
 - [ ] On completion of a recurring chore, generate the next occurrence per its recurrence rule (§4)

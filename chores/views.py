@@ -4,7 +4,7 @@ from django.contrib.auth.decorators import login_required
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
-from .forms import HouseholdCreateForm, HouseholdJoinForm, SignUpForm
+from .forms import ChoreForm, HouseholdCreateForm, HouseholdJoinForm, SignUpForm
 from .models import ActivityLog, Chore, Claim, Household, Membership, generate_invite_code
 
 
@@ -179,6 +179,118 @@ def remove_member(request, user_id):
     )
     messages.success(request, f"{target_user} was removed from the household.")
     return redirect("members")
+
+
+@login_required
+def chore_list(request):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    chores = membership.household.chores.filter(deleted_at__isnull=True)
+    return render(
+        request,
+        "chores/chore_list.html",
+        {"household": membership.household, "chores": chores},
+    )
+
+
+@login_required
+def chore_create(request):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+
+    if request.method == "POST":
+        form = ChoreForm(request.POST)
+        if form.is_valid():
+            chore = form.save(commit=False)
+            chore.household = membership.household
+            chore.created_by = request.user
+            chore.save()
+            ActivityLog.objects.create(
+                household=membership.household,
+                actor=request.user,
+                action=ActivityLog.Action.CHORE_CREATED,
+                chore=chore,
+                description=f"{request.user} created chore '{chore.name}'.",
+            )
+            messages.success(request, "Chore created.")
+            return redirect("chore_list")
+    else:
+        form = ChoreForm()
+    return render(
+        request, "chores/chore_form.html", {"form": form, "title": "New chore"}
+    )
+
+
+@login_required
+def chore_edit(request, chore_id):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    chore = get_object_or_404(
+        Chore,
+        id=chore_id,
+        household=membership.household,
+        deleted_at__isnull=True,
+    )
+
+    if request.method == "POST":
+        form = ChoreForm(request.POST, instance=chore)
+        if form.is_valid():
+            form.save()
+            ActivityLog.objects.create(
+                household=membership.household,
+                actor=request.user,
+                action=ActivityLog.Action.CHORE_EDITED,
+                chore=chore,
+                description=f"{request.user} edited chore '{chore.name}'.",
+            )
+            messages.success(request, "Chore updated.")
+            return redirect("chore_list")
+    else:
+        form = ChoreForm(instance=chore)
+    return render(
+        request,
+        "chores/chore_form.html",
+        {"form": form, "title": "Edit chore", "chore": chore},
+    )
+
+
+@login_required
+def chore_delete(request, chore_id):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    if request.method != "POST":
+        return redirect("chore_list")
+
+    chore = get_object_or_404(
+        Chore,
+        id=chore_id,
+        household=membership.household,
+        deleted_at__isnull=True,
+    )
+    chore.deleted_at = timezone.now()
+    chore.save(update_fields=["deleted_at"])
+    ActivityLog.objects.create(
+        household=membership.household,
+        actor=request.user,
+        action=ActivityLog.Action.CHORE_DELETED,
+        chore=chore,
+        description=f"{request.user} deleted chore '{chore.name}'.",
+    )
+    messages.success(request, f"'{chore.name}' was deleted.")
+    return redirect("chore_list")
+
+
+@login_required
+def chore_archive(request):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    chores = membership.household.chores.filter(deleted_at__isnull=False)
+    return render(request, "chores/chore_archive.html", {"chores": chores})
 
 
 @login_required
