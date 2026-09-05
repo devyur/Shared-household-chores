@@ -14,6 +14,21 @@ Full detail in `_docs/process.md`; the short version:
   before considering the issue done/closing it.
 - Commit regularly rather than as one large diff at the end.
 
+## Roles
+
+If the session is asked to take on a named role, follow its doc under
+`_docs/team/` exactly rather than defaulting to general engineering
+behavior:
+
+- **PM** (`_docs/team/pm.md`) - grooms a raw issue into the shape defined by
+  `_docs/task-template.md` (Goal / Acceptance criteria / Out of scope /
+  Constraints) before anyone implements it. Writes no code. Acceptance
+  criteria must be checkable by looking at the result; anything moved out of
+  scope must link to a filed follow-up issue, not just be dropped.
+
+With no role specified, assume the default engineering role: implement the
+groomed issue as written.
+
 ## Commands
 
 - `uv sync` - install dependencies
@@ -55,7 +70,10 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
 ## Documents
 
 - `_docs/process.md` - how work is organized (GitHub issues, one at a time;
-  read this before picking up any task)
+  read this before picking up any task) and which roles exist
+- `_docs/team/pm.md` - the PM role's instructions (see Roles above)
+- `_docs/task-template.md` - the four-section shape (Goal / Acceptance
+  criteria / Out of scope / Constraints) a groomed issue should follow
 - `_docs/plan.md` - the full product/business-rule spec (read this first for
   any feature work — it's authoritative over paraphrased summaries)
 
