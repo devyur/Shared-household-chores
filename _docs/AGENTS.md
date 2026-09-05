@@ -20,6 +20,11 @@ If the session is asked to take on a named role, follow its doc under
 `_docs/team/` exactly rather than defaulting to general engineering
 behavior:
 
+- **Orchestrator** (`_docs/process.md`) - the role for a long-running/looping
+  session: never implements or tests anything itself. Picks the next open
+  issue, launches Engineer and QA as subagents for it, sends a QA FAIL back
+  to Engineer with the QA comment as input, and repeats. It's the only role
+  that closes an issue, and only once QA has posted PASS.
 - **PM** (`_docs/team/pm.md`) - grooms a raw issue into the shape defined by
   `_docs/task-template.md` (Goal / Acceptance criteria / Out of scope /
   Constraints) before anyone implements it. Writes no code. Acceptance
@@ -34,8 +39,9 @@ behavior:
   own claims), runs the test suite, and posts a PASS/FAIL verdict as an
   issue comment. Fixes nothing itself.
 
-With no role specified, assume the Engineer role: implement the groomed
-issue as written.
+With no role specified in an interactive session, assume the Engineer role:
+implement the groomed issue as written. A looping/autonomous session should
+instead run as Orchestrator, per `_docs/process.md`.
 
 ## Commands
 
@@ -78,7 +84,9 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
 ## Documents
 
 - `_docs/process.md` - how work is organized (GitHub issues, one at a time;
-  read this before picking up any task) and which roles exist
+  read this before picking up any task), which roles exist, and the
+  Orchestrator lifecycle a looping session follows to drive Engineer/QA
+  automatically per issue
 - `_docs/team/pm.md`, `_docs/team/software-engineer.md`,
   `_docs/team/qa-engineer.md` - the PM/Engineer/QA role instructions (see
   Roles above)
