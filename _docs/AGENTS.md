@@ -34,9 +34,9 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
   scaffolding (see `_docs/plan.md` §2, §16 "explicitly out of scope").
 - Due-date-triggered state changes (auto-assignment, failure penalty, 24h
   point lock) are meant to be evaluated **lazily on read**, not via a
-  cron/Celery worker — see `_docs/claud-suggestions.md` and
-  `_docs/backlog.md` for the reasoning. Keep new work consistent with that
-  choice unless the user says otherwise.
+  cron/Celery worker (rationale in `_docs/claud-suggestions.md`, if you want
+  it). Keep new work consistent with that choice unless the user says
+  otherwise.
 - Every chore create/edit/delete and every point change must be logged to
   `ActivityLog` (see `chores/models.py`) — this is a stated business rule,
   not optional bookkeeping.
@@ -58,11 +58,15 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
   read this before picking up any task)
 - `_docs/plan.md` - the full product/business-rule spec (read this first for
   any feature work — it's authoritative over paraphrased summaries)
-- `_docs/backlog.md` - implementation backlog; sections 4-15 have moved to
-  GitHub issues (linked from that file) — check issue status there before
-  assuming a feature is unbuilt
-- `_docs/claud-suggestions.md` - tech-stack rationale, notably why lazy
-  evaluation was chosen over a scheduler/worker
+
+Historical, not required reading — the GitHub issues already carry what
+matters from these (each issue cites its `plan.md` § directly):
+
+- `_docs/backlog.md` - the original implementation backlog that sections 4-15
+  were split out of into issues #1-#12
+- `_docs/claud-suggestions.md` - tech-stack options considered before
+  settling on Django; only the lazy-eval rationale (noted under Rules above)
+  still applies
 
 ## GitHub issues
 
@@ -70,9 +74,8 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
 - Remaining feature work (recurring chores, claiming, auto-assignment,
   completion/failure, owner review, point adjustments, leaderboard,
   achievements, activity history, notifications, dashboard, tests) is tracked
-  as issues #1-#12 in this repo, linked from `_docs/backlog.md`. Read the
-  relevant `plan.md` section (§ numbers are cited per issue) before
-  implementing one.
+  as issues #1-#12 in this repo. Each issue cites the `plan.md` § it's
+  derived from — read that section before implementing.
 - Per `_docs/process.md`: work one issue at a time, confirm its acceptance
   criteria before starting and before closing it, and commit regularly as
   you go rather than in one final commit.
