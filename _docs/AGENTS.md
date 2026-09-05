@@ -3,6 +3,17 @@
 Django app (Python 3.14, Django 6.1) for a single-household chore/points
 tracker. Homework-scoped project — see `_docs/plan.md` for the full spec.
 
+## Workflow
+
+Full detail in `_docs/process.md`; the short version:
+
+- Work is picked up from GitHub issues, one at a time — check the "GitHub
+  issues" section below and the repo's issue list before starting anything,
+  rather than inventing new scope.
+- Read the issue's acceptance criteria before starting, and re-check them
+  before considering the issue done/closing it.
+- Commit regularly rather than as one large diff at the end.
+
 ## Commands
 
 - `uv sync` - install dependencies
@@ -43,6 +54,8 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
 
 ## Documents
 
+- `_docs/process.md` - how work is organized (GitHub issues, one at a time;
+  read this before picking up any task)
 - `_docs/plan.md` - the full product/business-rule spec (read this first for
   any feature work — it's authoritative over paraphrased summaries)
 - `_docs/backlog.md` - implementation backlog; sections 4-15 have moved to
@@ -60,3 +73,6 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
   as issues #1-#12 in this repo, linked from `_docs/backlog.md`. Read the
   relevant `plan.md` section (§ numbers are cited per issue) before
   implementing one.
+- Per `_docs/process.md`: work one issue at a time, confirm its acceptance
+  criteria before starting and before closing it, and commit regularly as
+  you go rather than in one final commit.
