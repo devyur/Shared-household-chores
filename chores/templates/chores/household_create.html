@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Create household{% endblock %}
+{% block content %}
+<h1>Create your household</h1>
+<p>You'll become its owner.</p>
+<form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Create household</button>
+</form>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ household.name }}{% endblock %}
+{% block content %}
+<h1>{{ household.name }}</h1>
+<p>You are {% if membership.role == "owner" %}the owner{% else %}a member{% endif %}.</p>
+
+<h2>Members</h2>
+<ul>
+{% for m in members %}
+    <li>{{ m.user.username }} ({{ m.role }})</li>
+{% endfor %}
+</ul>
+
+<p><a href="{% url 'members' %}">Manage household</a></p>
+<p><em>Chore dashboard coming soon.</em></p>
+{% endblock %}

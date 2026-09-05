@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Household members{% endblock %}
+{% block content %}
+<h1>{{ household.name }} — Members</h1>
+
+{% if is_owner %}
+<h2>Invite code</h2>
+<p>Share this code so others can join: <code>{{ household.invite_code }}</code></p>
+<form method="post" action="{% url 'regenerate_invite' %}">
+    {% csrf_token %}
+    <button type="submit">Regenerate code</button>
+</form>
+{% endif %}
+
+<h2>Active members</h2>
+<ul>
+{% for m in members %}
+    <li>
+        {{ m.user.username }} ({{ m.role }})
+        {% if is_owner and m.user_id != request.user.id %}
+        <form method="post" action="{% url 'remove_member' m.user.id %}" style="display:inline">
+            {% csrf_token %}
+            <button type="submit">Remove</button>
+        </form>
+        {% endif %}
+    </li>
+{% endfor %}
+</ul>
+{% endblock %}
