@@ -1,4 +1,5 @@
 import secrets
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
@@ -116,6 +117,54 @@ class Chore(models.Model):
     @property
     def is_deleted(self):
         return self.deleted_at is not None
+
+    def create_next_occurrence(self):
+        """Spawn the next occurrence of a recurring chore.
+
+        Called by the completion flow (#4) right after this chore is saved
+        as completed — this method doesn't decide *when* a chore is
+        completed, only what happens next if it was. Returns the new
+        `Chore`, or `None` for a non-recurring chore or one with no saved
+        `RecurrenceRule`.
+        """
+        if not self.is_recurring:
+            return None
+        try:
+            rule = self.recurrence_rule
+        except RecurrenceRule.DoesNotExist:
+            return None
+
+        if rule.rule_type == RecurrenceRule.RuleType.CALENDAR:
+            next_due = self.due_date + timedelta(days=rule.interval_days)
+        else:
+            base = (self.completed_at.date() if self.completed_at else self.due_date)
+            next_due = base + timedelta(days=rule.interval_days)
+
+        next_chore = Chore.objects.create(
+            household=self.household,
+            name=self.name,
+            description=self.description,
+            points=self.points,
+            due_date=next_due,
+            is_recurring=True,
+            created_by=self.created_by,
+        )
+        RecurrenceRule.objects.create(
+            chore=next_chore,
+            rule_type=rule.rule_type,
+            interval_days=rule.interval_days,
+        )
+        ActivityLog.objects.create(
+            household=self.household,
+            actor=None,
+            action=ActivityLog.Action.CHORE_CREATED,
+            chore=next_chore,
+            description=(
+                f"Next occurrence of '{self.name}' created automatically "
+                "after completion."
+            ),
+        )
+        return next_chore
 
 
 class Claim(models.Model):

@@ -3,7 +3,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import ActivityLog, Chore, Claim, Household, Membership
+from .models import ActivityLog, Chore, Claim, Household, Membership, RecurrenceRule
 
 STRONG_PASSWORD = "aVeryStrongPass1!"
 
@@ -66,6 +66,109 @@ class ChoreModelTests(TestCase):
         chore.save()
 
         self.assertTrue(chore.is_deleted)
+
+
+class ChoreCreateNextOccurrenceTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+
+    def make_chore(self, **overrides):
+        defaults = dict(
+            household=self.household,
+            name="Take out trash",
+            description="Bins to the curb",
+            points=10,
+            due_date=timezone.localdate(),
+            is_recurring=True,
+            created_by=self.alice,
+        )
+        defaults.update(overrides)
+        return Chore.objects.create(**defaults)
+
+    def test_non_recurring_chore_spawns_nothing(self):
+        chore = self.make_chore(is_recurring=False)
+
+        self.assertIsNone(chore.create_next_occurrence())
+        self.assertEqual(Chore.objects.count(), 1)
+
+    def test_recurring_chore_without_saved_rule_spawns_nothing(self):
+        chore = self.make_chore()
+
+        self.assertIsNone(chore.create_next_occurrence())
+        self.assertEqual(Chore.objects.count(), 1)
+
+    def test_calendar_based_next_due_from_original_due_date(self):
+        chore = self.make_chore(due_date=timezone.datetime(2026, 1, 1).date())
+        RecurrenceRule.objects.create(
+            chore=chore, rule_type=RecurrenceRule.RuleType.CALENDAR, interval_days=7
+        )
+        chore.status = Chore.Status.COMPLETED
+        chore.completed_at = timezone.datetime(2026, 1, 5, tzinfo=timezone.get_current_timezone())
+        chore.save()
+
+        next_chore = chore.create_next_occurrence()
+
+        self.assertIsNotNone(next_chore)
+        self.assertEqual(next_chore.due_date, timezone.datetime(2026, 1, 8).date())
+
+    def test_completion_based_next_due_from_completion_date(self):
+        chore = self.make_chore(due_date=timezone.datetime(2026, 1, 1).date())
+        RecurrenceRule.objects.create(
+            chore=chore, rule_type=RecurrenceRule.RuleType.COMPLETION, interval_days=3
+        )
+        chore.status = Chore.Status.COMPLETED
+        chore.completed_at = timezone.datetime(2026, 1, 10, tzinfo=timezone.get_current_timezone())
+        chore.save()
+
+        next_chore = chore.create_next_occurrence()
+
+        self.assertEqual(next_chore.due_date, timezone.datetime(2026, 1, 13).date())
+
+    def test_next_occurrence_copies_fields_and_rule_and_starts_open(self):
+        chore = self.make_chore()
+        RecurrenceRule.objects.create(
+            chore=chore, rule_type=RecurrenceRule.RuleType.CALENDAR, interval_days=14
+        )
+
+        next_chore = chore.create_next_occurrence()
+
+        self.assertEqual(next_chore.household, chore.household)
+        self.assertEqual(next_chore.name, chore.name)
+        self.assertEqual(next_chore.description, chore.description)
+        self.assertEqual(next_chore.points, chore.points)
+        self.assertEqual(next_chore.created_by, chore.created_by)
+        self.assertEqual(next_chore.status, Chore.Status.OPEN)
+        self.assertTrue(next_chore.is_recurring)
+        self.assertEqual(next_chore.recurrence_rule.rule_type, RecurrenceRule.RuleType.CALENDAR)
+        self.assertEqual(next_chore.recurrence_rule.interval_days, 14)
+
+    def test_only_one_next_occurrence_created_per_call(self):
+        chore = self.make_chore()
+        RecurrenceRule.objects.create(
+            chore=chore, rule_type=RecurrenceRule.RuleType.CALENDAR, interval_days=7
+        )
+
+        chore.create_next_occurrence()
+
+        self.assertEqual(Chore.objects.count(), 2)
+
+    def test_next_occurrence_is_logged_as_system_triggered(self):
+        chore = self.make_chore()
+        RecurrenceRule.objects.create(
+            chore=chore, rule_type=RecurrenceRule.RuleType.CALENDAR, interval_days=7
+        )
+
+        next_chore = chore.create_next_occurrence()
+
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_CREATED,
+                chore=next_chore,
+                actor__isnull=True,
+            ).exists()
+        )
 
 
 class SignupViewTests(TestCase):
@@ -357,6 +460,52 @@ class ChoreCreateViewTests(TestCase):
         )
         self.assertFalse(Chore.objects.filter(name="Clean kitchen").exists())
 
+    def test_recurring_chore_requires_rule_fields(self):
+        self.client.force_login(self.bob)
+
+        response = self.client.post(
+            reverse("chore_create"),
+            {
+                "name": "Water plants",
+                "points": 5,
+                "due_date": timezone.localdate(),
+                "is_recurring": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Chore.objects.filter(name="Water plants").exists())
+        self.assertFormError(
+            response.context["form"],
+            "recurrence_rule_type",
+            "Required for a recurring chore.",
+        )
+        self.assertFormError(
+            response.context["form"],
+            "recurrence_interval_days",
+            "Required for a recurring chore.",
+        )
+
+    def test_recurring_chore_saves_its_recurrence_rule(self):
+        self.client.force_login(self.bob)
+
+        self.client.post(
+            reverse("chore_create"),
+            {
+                "name": "Water plants",
+                "points": 5,
+                "due_date": timezone.localdate(),
+                "is_recurring": True,
+                "recurrence_rule_type": RecurrenceRule.RuleType.CALENDAR,
+                "recurrence_interval_days": 3,
+            },
+            follow=True,
+        )
+
+        chore = Chore.objects.get(name="Water plants")
+        self.assertEqual(chore.recurrence_rule.rule_type, RecurrenceRule.RuleType.CALENDAR)
+        self.assertEqual(chore.recurrence_rule.interval_days, 3)
+
 
 class ChoreEditViewTests(TestCase):
     def setUp(self):
@@ -411,6 +560,29 @@ class ChoreEditViewTests(TestCase):
         response = self.client.get(reverse("chore_edit", args=[self.chore.id]))
 
         self.assertEqual(response.status_code, 404)
+
+    def test_unchecking_is_recurring_removes_its_recurrence_rule(self):
+        RecurrenceRule.objects.create(
+            chore=self.chore,
+            rule_type=RecurrenceRule.RuleType.CALENDAR,
+            interval_days=7,
+        )
+        self.client.force_login(self.bob)
+
+        self.client.post(
+            reverse("chore_edit", args=[self.chore.id]),
+            {
+                "name": self.chore.name,
+                "points": self.chore.points,
+                "due_date": self.chore.due_date,
+                "is_recurring": False,
+            },
+            follow=True,
+        )
+
+        self.assertFalse(
+            RecurrenceRule.objects.filter(chore=self.chore).exists()
+        )
 
 
 class ChoreDeleteViewTests(TestCase):

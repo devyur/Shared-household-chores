@@ -4,8 +4,37 @@
 <h1>{{ title }}</h1>
 <form method="post">
     {% csrf_token %}
-    {{ form.as_p }}
+    {{ form.non_field_errors }}
+    <p>{{ form.name.label_tag }} {{ form.name }} {{ form.name.errors }}</p>
+    <p>{{ form.description.label_tag }} {{ form.description }} {{ form.description.errors }}</p>
+    <p>{{ form.points.label_tag }} {{ form.points }} {{ form.points.errors }}</p>
+    <p>{{ form.due_date.label_tag }} {{ form.due_date }} {{ form.due_date.errors }}</p>
+    <p>{{ form.is_recurring.label_tag }} {{ form.is_recurring }} {{ form.is_recurring.errors }}</p>
+    <div id="recurrence-fields">
+        <p>{{ form.recurrence_rule_type.label_tag }} {{ form.recurrence_rule_type }} {{ form.recurrence_rule_type.errors }}</p>
+        <p>{{ form.recurrence_interval_days.label_tag }} {{ form.recurrence_interval_days }} {{ form.recurrence_interval_days.errors }}</p>
+    </div>
     <button type="submit">Save</button>
 </form>
 <p><a href="{% url 'chore_list' %}">Back to chores</a></p>
+<script>
+    (function () {
+        var checkbox = document.getElementById("id_is_recurring");
+        var fields = document.getElementById("recurrence-fields");
+        var ruleType = document.getElementById("id_recurrence_rule_type");
+        var interval = document.getElementById("id_recurrence_interval_days");
+
+        function sync() {
+            var recurring = checkbox.checked;
+            fields.style.display = recurring ? "" : "none";
+            if (!recurring) {
+                ruleType.value = "";
+                interval.value = "";
+            }
+        }
+
+        checkbox.addEventListener("change", sync);
+        sync();
+    })();
+</script>
 {% endblock %}

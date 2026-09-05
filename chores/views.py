@@ -207,6 +207,7 @@ def chore_create(request):
             chore.household = membership.household
             chore.created_by = request.user
             chore.save()
+            form.save_recurrence_rule(chore)
             ActivityLog.objects.create(
                 household=membership.household,
                 actor=request.user,
@@ -239,6 +240,7 @@ def chore_edit(request, chore_id):
         form = ChoreForm(request.POST, instance=chore)
         if form.is_valid():
             form.save()
+            form.save_recurrence_rule(chore)
             ActivityLog.objects.create(
                 household=membership.household,
                 actor=request.user,
