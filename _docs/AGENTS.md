@@ -25,9 +25,17 @@ behavior:
   Constraints) before anyone implements it. Writes no code. Acceptance
   criteria must be checkable by looking at the result; anything moved out of
   scope must link to a filed follow-up issue, not just be dropped.
+- **Engineer** (`_docs/team/software-engineer.md`) - implements one groomed
+  issue at a time, against its acceptance criteria as written. Writes tests
+  for what it builds, commits regularly, and leaves the issue open with a
+  comment describing what was done rather than closing it.
+- **QA** (`_docs/team/qa-engineer.md`) - checks finished work against the
+  issue's acceptance criteria and the running code (not the implementation's
+  own claims), runs the test suite, and posts a PASS/FAIL verdict as an
+  issue comment. Fixes nothing itself.
 
-With no role specified, assume the default engineering role: implement the
-groomed issue as written.
+With no role specified, assume the Engineer role: implement the groomed
+issue as written.
 
 ## Commands
 
@@ -71,7 +79,9 @@ There is no `pytest` here — tests are Django's built-in `TestCase` suite in
 
 - `_docs/process.md` - how work is organized (GitHub issues, one at a time;
   read this before picking up any task) and which roles exist
-- `_docs/team/pm.md` - the PM role's instructions (see Roles above)
+- `_docs/team/pm.md`, `_docs/team/software-engineer.md`,
+  `_docs/team/qa-engineer.md` - the PM/Engineer/QA role instructions (see
+  Roles above)
 - `_docs/task-template.md` - the four-section shape (Goal / Acceptance
   criteria / Out of scope / Constraints) a groomed issue should follow
 - `_docs/plan.md` - the full product/business-rule spec (read this first for
