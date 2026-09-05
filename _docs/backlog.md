@@ -26,51 +26,17 @@ Design choice carried over from `_docs/claud-suggestions.md`: due-date-triggered
 - [x] Soft-delete chores into an archive/history view instead of hard delete (§3, §13)
 - [x] Log every create/edit/delete to `ActivityLog`
 
-## 4. Recurring chores
-- [ ] On completion of a recurring chore, generate the next occurrence per its recurrence rule (§4)
-- [ ] Allow claiming a future (not-yet-due) occurrence (§4)
+Sections 4-15 have been moved to GitHub issues:
 
-## 5. Claiming
-- [ ] Members can claim a chore; multiple claims allowed per chore (§5, §17.3)
-- [ ] Claiming does not award points (§5)
-- [ ] Decide and document what happens if a claimant leaves before assignment (§18)
-
-## 6. Auto-assignment at due date
-- [ ] Lazy-eval routine: when a chore with claims reaches its due date, assign it to the claimant with the highest current points (§5, §17.4)
-- [ ] Define and document the tie-break rule (not specified in plan.md)
-- [ ] Unclaimed chores stay available past their due date, no auto-assignment (§5, §17.15)
-
-## 7. Completion & failure
-- [ ] Assigned member marks their chore complete → immediately award configured points (§6, §17.6)
-- [ ] Lazy-eval routine: if an assigned chore's due date passes uncompleted, mark it failed, deduct 50% of its point value (can go negative), reopen the chore, log to `ActivityLog` (§8, §17.7, §17.8)
-
-## 8. Owner review window
-- [ ] Owner can adjust a completed chore's awarded points within 24h of completion, capped at ±50% of the chore's original value, with a required reason (§7, §17.9, §17.10, §17.11)
-- [ ] Lazy-eval routine: once 24h have elapsed, lock the points permanently (§7, §17.12)
-
-## 9. Direct owner point adjustments
-- [ ] Owner can adjust any member's points at any time, reason required, visible to the whole household (§11, §17.13, §17.14)
-
-## 10. Points, leaderboard & summaries
-- [ ] Compute lifetime points per member from `PointEvent` history
-- [ ] Weekly/monthly point summaries (simple aggregation queries) (§9)
-- [ ] Leaderboard view: total points + chores completed today (§9)
-
-## 11. Achievements/badges
-- [ ] Define a small initial rule set (e.g. "first chore completed", "N chores in a week") — exact rules are an implementation detail (§10, §18)
-- [ ] Evaluate and award achievements when relevant events occur (completion, point milestones)
-
-## 12. Activity history / audit log
-- [ ] Central log covering: chore create/edit/delete, claims, assignments, completions/failures, point changes, membership changes (§13)
-- [ ] History view showing actor + timestamp per entry, including deleted chores (§13)
-
-## 13. Notifications
-- [ ] Minimal due-date reminder — e.g. a "due today" banner/section on the dashboard is sufficient for MVP; email is optional (§12, §18)
-
-## 14. Main dashboard
-- [ ] Home screen: today's chores + compact leaderboard, making responsibility and priority immediately clear (§14)
-
-## 15. Tests
-- [ ] Unit tests for the point-math edge cases: failure penalty, ±50% adjustment cap, negative points, 24h lock boundary
-- [ ] Unit tests for auto-assignment (highest points wins, tie-break rule)
-- [ ] Basic view/permission tests (any member can CRUD chores, only owner can adjust points/remove members)
+- [#1 Recurring chores](https://github.com/devyur/Shared-household-chores/issues/1)
+- [#2 Claiming](https://github.com/devyur/Shared-household-chores/issues/2)
+- [#3 Auto-assignment at due date](https://github.com/devyur/Shared-household-chores/issues/3)
+- [#4 Completion & failure](https://github.com/devyur/Shared-household-chores/issues/4)
+- [#5 Owner review window](https://github.com/devyur/Shared-household-chores/issues/5)
+- [#6 Direct owner point adjustments](https://github.com/devyur/Shared-household-chores/issues/6)
+- [#7 Points, leaderboard & summaries](https://github.com/devyur/Shared-household-chores/issues/7)
+- [#8 Achievements/badges](https://github.com/devyur/Shared-household-chores/issues/8)
+- [#9 Activity history / audit log](https://github.com/devyur/Shared-household-chores/issues/9)
+- [#10 Notifications](https://github.com/devyur/Shared-household-chores/issues/10)
+- [#11 Main dashboard](https://github.com/devyur/Shared-household-chores/issues/11)
+- [#12 Tests](https://github.com/devyur/Shared-household-chores/issues/12)
