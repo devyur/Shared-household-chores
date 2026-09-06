@@ -11,6 +11,7 @@
             | {{ user.username }}
             | <a href="{% url 'chore_list' %}">Chores</a>
             | <a href="{% url 'members' %}">Household</a>
+            | <a href="{% url 'activity_history' %}">Activity</a>
             | <form action="{% url 'logout' %}" method="post" style="display:inline">
                 {% csrf_token %}
                 <button type="submit">Log out</button>

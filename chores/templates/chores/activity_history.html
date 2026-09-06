@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Activity history{% endblock %}
+{% block content %}
+<h1>{{ household.name }} — Activity history</h1>
+
+<p><a href="{% url 'chore_list' %}">Chores</a> | <a href="{% url 'members' %}">Household</a></p>
+
+<table>
+    <thead>
+        <tr>
+            <th>When</th>
+            <th>Action</th>
+            <th>Actor</th>
+            <th>Chore</th>
+            <th>Member</th>
+            <th>Description</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for entry in page_obj %}
+        <tr>
+            <td>{{ entry.created_at|date:"Y-m-d H:i" }}</td>
+            <td>{{ entry.get_action_display }}</td>
+            <td>{% if entry.actor %}{{ entry.actor.username }}{% else %}system{% endif %}</td>
+            <td>{% if entry.chore %}{{ entry.chore.name }}{% endif %}</td>
+            <td>{% if entry.member %}{{ entry.member.username }}{% endif %}</td>
+            <td>{{ entry.description }}</td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="6">No activity yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if page_obj.has_other_pages %}
+<p>
+    {% if page_obj.has_previous %}
+        <a href="?page={{ page_obj.previous_page_number }}">Previous</a>
+    {% endif %}
+    Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+    {% if page_obj.has_next %}
+        <a href="?page={{ page_obj.next_page_number }}">Next</a>
+    {% endif %}
+</p>
+{% endif %}
+{% endblock %}

@@ -25,6 +25,7 @@ from .models import (
     week_bounds,
     weekly_point_total,
 )
+from .views import ACTIVITY_LOG_PAGE_SIZE
 
 STRONG_PASSWORD = "aVeryStrongPass1!"
 
@@ -2708,3 +2709,187 @@ class RemovedMemberKeepsAchievementsTests(TestCase):
                 member=bob, achievement__name="First Chore"
             ).exists()
         )
+
+
+class ActivityHistoryViewTests(TestCase):
+    """#9, §13: a browsable, paginated history view over `ActivityLog`."""
+
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def test_anonymous_user_is_redirected_to_login(self):
+        response = self.client.get(reverse("activity_history"))
+        self.assertNotEqual(response.status_code, 200)
+
+    def test_non_member_is_redirected_home(self):
+        outsider = create_user("outsider")
+        self.client.force_login(outsider)
+
+        response = self.client.get(reverse("activity_history"))
+
+        self.assertRedirects(response, reverse("home"), target_status_code=302)
+
+    def test_lists_entries_newest_first(self):
+        older = ActivityLog.objects.create(
+            household=self.household,
+            actor=self.alice,
+            action=ActivityLog.Action.MEMBER_JOINED,
+            member=self.alice,
+            description="older entry",
+        )
+        ActivityLog.objects.filter(pk=older.pk).update(
+            created_at=timezone.now() - timedelta(days=1)
+        )
+        newer = ActivityLog.objects.create(
+            household=self.household,
+            actor=self.bob,
+            action=ActivityLog.Action.MEMBER_JOINED,
+            member=self.bob,
+            description="newer entry",
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("activity_history"))
+
+        entries = list(response.context["page_obj"])
+        self.assertEqual(entries[0].pk, newer.pk)
+        self.assertEqual(entries[1].pk, older.pk)
+        # Matches the model's default ordering (§13's stated requirement).
+        self.assertEqual(list(ActivityLog.objects.all()), entries)
+
+    def test_row_shows_action_actor_chore_member_description_and_timestamp(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Dishes",
+            points=10,
+            due_date=timezone.localdate(),
+            created_by=self.alice,
+        )
+        entry = ActivityLog.objects.create(
+            household=self.household,
+            actor=self.alice,
+            action=ActivityLog.Action.CHORE_CREATED,
+            chore=chore,
+            member=self.bob,
+            description="alice created chore 'Dishes'.",
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("activity_history"))
+
+        self.assertContains(response, "Chore created")
+        self.assertContains(response, "alice")
+        self.assertContains(response, "Dishes")
+        self.assertContains(response, "bob")
+        self.assertContains(response, "alice created chore &#x27;Dishes&#x27;.")
+        self.assertContains(response, entry.created_at.strftime("%Y-%m-%d"))
+
+    def test_system_triggered_entry_shows_system_for_null_actor(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Vacuum",
+            points=5,
+            due_date=timezone.localdate() - timedelta(days=1),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        ActivityLog.objects.create(
+            household=self.household,
+            actor=None,
+            action=ActivityLog.Action.CHORE_FAILED,
+            chore=chore,
+            member=self.bob,
+            description="'Vacuum' was not completed by its due date.",
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("activity_history"))
+
+        self.assertContains(response, "system")
+
+    def test_entry_for_soft_deleted_chore_still_displays_and_is_not_filtered_out(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Sweep porch",
+            points=5,
+            due_date=timezone.localdate(),
+            created_by=self.alice,
+        )
+        ActivityLog.objects.create(
+            household=self.household,
+            actor=self.alice,
+            action=ActivityLog.Action.CHORE_CREATED,
+            chore=chore,
+            description="alice created chore 'Sweep porch'.",
+        )
+        chore.deleted_at = timezone.now()
+        chore.save(update_fields=["deleted_at"])
+        entry = ActivityLog.objects.create(
+            household=self.household,
+            actor=self.alice,
+            action=ActivityLog.Action.CHORE_DELETED,
+            chore=chore,
+            description="alice deleted chore 'Sweep porch'.",
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("activity_history"))
+
+        self.assertContains(response, "Sweep porch")
+        page_ids = [e.pk for e in response.context["page_obj"]]
+        self.assertIn(entry.pk, page_ids)
+        # The chore link/reference still resolves — SET_NULL never fired
+        # since the chore row itself was never hard-deleted.
+        entry.refresh_from_db()
+        self.assertIsNotNone(entry.chore_id)
+        self.assertEqual(entry.chore.name, "Sweep porch")
+
+    def test_entry_for_removed_member_still_shows_username(self):
+        entry = ActivityLog.objects.create(
+            household=self.household,
+            actor=self.alice,
+            action=ActivityLog.Action.MEMBER_REMOVED,
+            member=self.bob,
+            description="alice removed bob from the household.",
+        )
+        bob_membership = Membership.objects.get(household=self.household, user=self.bob)
+        bob_membership.removed_at = timezone.now()
+        bob_membership.save(update_fields=["removed_at"])
+
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("activity_history"))
+
+        self.assertContains(response, "bob")
+        entry.refresh_from_db()
+        self.assertEqual(entry.member.username, "bob")
+
+    def test_page_size_is_bounded_and_paginates(self):
+        for i in range(ACTIVITY_LOG_PAGE_SIZE + 5):
+            ActivityLog.objects.create(
+                household=self.household,
+                actor=self.alice,
+                action=ActivityLog.Action.MEMBER_JOINED,
+                member=self.alice,
+                description=f"entry {i}",
+            )
+        self.client.force_login(self.alice)
+
+        first_page = self.client.get(reverse("activity_history"))
+        self.assertEqual(
+            len(first_page.context["page_obj"]), ACTIVITY_LOG_PAGE_SIZE
+        )
+        self.assertTrue(first_page.context["page_obj"].has_next())
+
+        second_page = self.client.get(reverse("activity_history"), {"page": 2})
+        self.assertEqual(len(second_page.context["page_obj"]), 5)
+        self.assertFalse(second_page.context["page_obj"].has_next())
+
+    def test_reachable_from_normal_navigation(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("chore_list"))
+
+        self.assertContains(response, reverse("activity_history"))

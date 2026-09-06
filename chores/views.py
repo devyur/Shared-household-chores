@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
+from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.shortcuts import get_object_or_404, redirect, render
@@ -25,6 +26,11 @@ from .models import (
     week_bounds,
     weekly_point_total,
 )
+
+
+# Entries per page for the activity history view (#9). plan.md §13 doesn't
+# specify a page size, so this is the issue's documented choice.
+ACTIVITY_LOG_PAGE_SIZE = 50
 
 
 def get_household():
@@ -742,6 +748,41 @@ def chore_archive(request):
         return redirect("home")
     chores = membership.household.chores.filter(deleted_at__isnull=False)
     return render(request, "chores/chore_archive.html", {"chores": chores})
+
+
+@login_required
+def activity_history(request):
+    """Paginated, browsable `ActivityLog` history for the household (#9,
+    §13).
+
+    Newest-first ordering comes from `ActivityLog.Meta.ordering` (already
+    `["-created_at"]`), so no explicit `order_by` is needed here.
+
+    An entry about a since-soft-deleted chore or since-removed member still
+    renders correctly with no special-casing: chores are only ever
+    soft-deleted (`Chore.deleted_at`, `Chore` rows are never actually
+    removed from the DB) and members are only ever deactivated
+    (`Membership.removed_at`, their `User` row is never deleted either), so
+    `ActivityLog.chore`/`.actor`/`.member` keep resolving to the real row
+    regardless — `chore`'s `on_delete=SET_NULL` only matters for a `Chore`
+    row that's actually deleted, which this app never does. Entries are
+    never filtered by `chore.deleted_at` or by membership status.
+
+    Paginated at `ACTIVITY_LOG_PAGE_SIZE` (50) entries per page via
+    `Paginator`, per the issue's ask to bound an otherwise-unbounded log.
+    """
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    household = membership.household
+    entries = household.activity_logs.select_related("actor", "chore", "member")
+    paginator = Paginator(entries, ACTIVITY_LOG_PAGE_SIZE)
+    page_obj = paginator.get_page(request.GET.get("page"))
+    return render(
+        request,
+        "chores/activity_history.html",
+        {"household": household, "page_obj": page_obj},
+    )
 
 
 @login_required
