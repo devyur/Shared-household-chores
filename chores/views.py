@@ -1,7 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
@@ -312,9 +312,12 @@ def chore_claim(request, chore_id):
         return redirect("chore_list")
 
     try:
-        Claim.objects.create(chore=chore, member=request.user)
+        with transaction.atomic():
+            Claim.objects.create(chore=chore, member=request.user)
     except IntegrityError:
         # unique_together(chore, member) — already claimed, not an error state.
+        # The inner atomic() keeps this failure from poisoning the outer
+        # request transaction.
         messages.info(request, f"You already claimed '{chore.name}'.")
     else:
         ActivityLog.objects.create(

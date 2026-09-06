@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.contrib.auth.models import User
 from django.test import TestCase
 from django.urls import reverse
@@ -651,3 +653,220 @@ class RegenerateInviteViewTests(TestCase):
 
         self.household.refresh_from_db()
         self.assertNotEqual(self.household.invite_code, original_code)
+
+
+class ChoreClaimViewTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        self.carol = create_user("carol")
+        add_member(self.household, self.bob)
+        add_member(self.household, self.carol)
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+        )
+
+    def test_active_member_can_claim_an_open_chore(self):
+        self.client.force_login(self.bob)
+
+        response = self.client.post(
+            reverse("chore_claim", args=[self.chore.id]), follow=True
+        )
+
+        self.assertTrue(
+            Claim.objects.filter(chore=self.chore, member=self.bob).exists()
+        )
+        self.assertRedirects(response, reverse("chore_list"))
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_CLAIMED,
+                chore=self.chore,
+                actor=self.bob,
+            ).exists()
+        )
+
+    def test_claiming_does_not_require_due_date_to_have_arrived(self):
+        future_chore = Chore.objects.create(
+            household=self.household,
+            name="Deep clean fridge",
+            points=15,
+            due_date=timezone.localdate() + timedelta(days=30),
+        )
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_claim", args=[future_chore.id]), follow=True)
+
+        self.assertTrue(
+            Claim.objects.filter(chore=future_chore, member=self.bob).exists()
+        )
+
+    def test_multiple_members_can_claim_the_same_chore(self):
+        self.client.force_login(self.bob)
+        self.client.post(reverse("chore_claim", args=[self.chore.id]))
+        self.client.force_login(self.carol)
+        self.client.post(reverse("chore_claim", args=[self.chore.id]))
+
+        self.assertEqual(self.chore.claims.count(), 2)
+
+    def test_claiming_twice_does_not_error_and_stays_a_single_claim(self):
+        self.client.force_login(self.bob)
+        self.client.post(reverse("chore_claim", args=[self.chore.id]))
+
+        response = self.client.post(
+            reverse("chore_claim", args=[self.chore.id]), follow=True
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            Claim.objects.filter(chore=self.chore, member=self.bob).count(), 1
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("already claimed" in m for m in messages))
+
+    def test_claiming_does_not_change_status_assignment_or_points(self):
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_claim", args=[self.chore.id]))
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.OPEN)
+        self.assertIsNone(self.chore.assigned_to)
+        self.assertFalse(self.bob.point_events.exists())
+
+    def test_claiming_is_rejected_once_chore_is_no_longer_open(self):
+        self.chore.status = Chore.Status.ASSIGNED
+        self.chore.assigned_to = self.carol
+        self.chore.save()
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_claim", args=[self.chore.id]), follow=True)
+
+        self.assertFalse(
+            Claim.objects.filter(chore=self.chore, member=self.bob).exists()
+        )
+
+    def test_claim_button_hidden_once_chore_is_no_longer_open(self):
+        self.chore.status = Chore.Status.ASSIGNED
+        self.chore.assigned_to = self.carol
+        self.chore.save()
+        self.client.force_login(self.bob)
+
+        response = self.client.get(reverse("chore_list"))
+
+        self.assertNotContains(
+            response, f'action="{reverse("chore_claim", args=[self.chore.id])}"'
+        )
+
+    def test_get_request_does_not_claim(self):
+        self.client.force_login(self.bob)
+
+        self.client.get(reverse("chore_claim", args=[self.chore.id]))
+
+        self.assertFalse(
+            Claim.objects.filter(chore=self.chore, member=self.bob).exists()
+        )
+
+    def test_user_without_membership_cannot_claim(self):
+        outsider = create_user("dave")
+        self.client.force_login(outsider)
+
+        response = self.client.post(reverse("chore_claim", args=[self.chore.id]))
+
+        self.assertRedirects(
+            response, reverse("home"), fetch_redirect_response=False
+        )
+        self.assertFalse(
+            Claim.objects.filter(chore=self.chore, member=outsider).exists()
+        )
+
+    def test_chore_list_shows_claimants(self):
+        Claim.objects.create(chore=self.chore, member=self.bob)
+        self.client.force_login(self.carol)
+
+        response = self.client.get(reverse("chore_list"))
+
+        self.assertContains(response, "bob")
+
+
+class ChoreUnclaimViewTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        self.carol = create_user("carol")
+        add_member(self.household, self.bob)
+        add_member(self.household, self.carol)
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+        )
+        Claim.objects.create(chore=self.chore, member=self.bob)
+
+    def test_member_can_withdraw_own_claim_while_open(self):
+        self.client.force_login(self.bob)
+
+        response = self.client.post(
+            reverse("chore_unclaim", args=[self.chore.id]), follow=True
+        )
+
+        self.assertFalse(
+            Claim.objects.filter(chore=self.chore, member=self.bob).exists()
+        )
+        self.assertRedirects(response, reverse("chore_list"))
+
+    def test_withdrawing_does_not_change_status_assignment_or_points(self):
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_unclaim", args=[self.chore.id]))
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.OPEN)
+        self.assertIsNone(self.chore.assigned_to)
+        self.assertFalse(self.bob.point_events.exists())
+
+    def test_withdrawing_is_not_logged(self):
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_unclaim", args=[self.chore.id]))
+
+        self.assertFalse(
+            ActivityLog.objects.filter(household=self.household, chore=self.chore).exists()
+        )
+
+    def test_withdrawing_does_not_affect_other_members_claims(self):
+        Claim.objects.create(chore=self.chore, member=self.carol)
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_unclaim", args=[self.chore.id]))
+
+        self.assertTrue(
+            Claim.objects.filter(chore=self.chore, member=self.carol).exists()
+        )
+
+    def test_cannot_withdraw_once_chore_is_no_longer_open(self):
+        self.chore.status = Chore.Status.ASSIGNED
+        self.chore.assigned_to = self.bob
+        self.chore.save()
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_unclaim", args=[self.chore.id]), follow=True)
+
+        self.assertTrue(
+            Claim.objects.filter(chore=self.chore, member=self.bob).exists()
+        )
+
+    def test_get_request_does_not_withdraw(self):
+        self.client.force_login(self.bob)
+
+        self.client.get(reverse("chore_unclaim", args=[self.chore.id]))
+
+        self.assertTrue(
+            Claim.objects.filter(chore=self.chore, member=self.bob).exists()
+        )
