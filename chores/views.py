@@ -83,8 +83,33 @@ def home(request):
             )
             .exclude(status=Chore.Status.COMPLETED)
             .select_related("assigned_to")
+            .prefetch_related("claims__member")
             .order_by("name")
         )
+        # For an `open` due-today chore, its responsible party is its list
+        # of claimants (or "unclaimed" if none) rather than an assignee —
+        # same claims-based pattern `chore_list` (#2) uses. `assigned`/
+        # `completed` chores already carry `assigned_to` directly. (#11, §14)
+        for chore in due_today_chores:
+            chore.claimants = [claim.member for claim in chore.claims.all()]
+
+        # Compact leaderboard (#11, §14): reuses #7's `current_point_total`/
+        # `chores_completed_on` helpers rather than reimplementing the
+        # aggregation, ranked the same way (lifetime points descending) but
+        # with fewer columns than the full `/household/leaderboard/` view —
+        # just enough to see rank/points at a glance, with a link to that
+        # full view for detail.
+        today = timezone.localdate()
+        leaderboard_rows = [
+            {
+                "member": m,
+                "lifetime_points": current_point_total(m.user),
+                "completed_today": chores_completed_on(m.user, today),
+            }
+            for m in members
+        ]
+        leaderboard_rows.sort(key=lambda row: row["lifetime_points"], reverse=True)
+
         return render(
             request,
             "chores/home.html",
@@ -93,6 +118,7 @@ def home(request):
                 "membership": membership,
                 "members": members,
                 "due_today_chores": due_today_chores,
+                "leaderboard_rows": leaderboard_rows,
             },
         )
     if get_household():

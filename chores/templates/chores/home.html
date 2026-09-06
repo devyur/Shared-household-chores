@@ -11,12 +11,48 @@
     {% for chore in due_today_chores %}
         <li>
             {{ chore.name }} ({{ chore.points }} pts)
-            {% if chore.assigned_to %}&mdash; assigned to {{ chore.assigned_to.username }}{% else %}&mdash; open{% endif %}
+            &mdash;
+            {% if chore.status == "assigned" or chore.status == "completed" %}
+                assigned to {{ chore.assigned_to.username }}
+            {% elif chore.claimants %}
+                claimed by {% for claimant in chore.claimants %}{{ claimant.username }}{% if not forloop.last %}, {% endif %}{% endfor %}
+            {% else %}
+                unclaimed
+            {% endif %}
         </li>
     {% endfor %}
     </ul>
 </section>
 {% endif %}
+
+<section id="leaderboard-summary">
+    <h2>Leaderboard</h2>
+    {% if leaderboard_rows %}
+    <table>
+        <thead>
+            <tr>
+                <th>Rank</th>
+                <th>Member</th>
+                <th>Points</th>
+                <th>Completed today</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for row in leaderboard_rows %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ row.member.user.username }}</td>
+                <td>{{ row.lifetime_points }}</td>
+                <td>{{ row.completed_today }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No active household members yet.</p>
+    {% endif %}
+    <p><a href="{% url 'leaderboard' %}">View full leaderboard</a></p>
+</section>
 
 <h2>Members</h2>
 <ul>

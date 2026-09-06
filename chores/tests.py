@@ -853,6 +853,166 @@ class HomeViewDueTodayTests(TestCase):
         self.assertNotContains(response, 'id="due-today"')
 
 
+class HomeViewResponsiblePartyTests(TestCase):
+    """Home page's "who's responsible" display for each due-today chore
+    (#11, §14): the assignee for `assigned`/`completed` chores, otherwise
+    "unclaimed" or the list of claimants for an `open` chore.
+    """
+
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+        self.today = timezone.localdate()
+
+    def test_assigned_chore_shows_assignee_name(self):
+        Chore.objects.create(
+            household=self.household,
+            name="Take out trash",
+            points=5,
+            due_date=self.today,
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, "bob")
+
+    def test_open_chore_with_no_claims_shows_unclaimed(self):
+        Chore.objects.create(
+            household=self.household,
+            name="Vacuum living room",
+            points=10,
+            due_date=self.today,
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, "unclaimed")
+
+    def test_open_chore_with_claims_shows_claimants(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Mow lawn",
+            points=15,
+            due_date=self.today,
+        )
+        Claim.objects.create(chore=chore, member=self.alice)
+        Claim.objects.create(chore=chore, member=self.bob)
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, "claimed by")
+        self.assertContains(response, "alice")
+        self.assertContains(response, "bob")
+        due_today = response.context["due_today_chores"]
+        shown_chore = next(c for c in due_today if c.id == chore.id)
+        self.assertCountEqual(shown_chore.claimants, [self.alice, self.bob])
+
+
+class HomeViewLeaderboardTests(TestCase):
+    """Home page's compact leaderboard (#11, §14): reuses #7's point-total
+    and completed-today helpers, ranked the same way as the full
+    leaderboard, with a link out to it.
+    """
+
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def get_row(self, response, user):
+        return next(
+            row
+            for row in response.context["leaderboard_rows"]
+            if row["member"].user_id == user.id
+        )
+
+    def test_zero_point_events_renders_all_members_at_zero(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.context["leaderboard_rows"]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["lifetime_points"], 0)
+            self.assertEqual(row["completed_today"], 0)
+
+    def test_rows_sorted_by_lifetime_points_descending(self):
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=10
+        )
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=50
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        rows = response.context["leaderboard_rows"]
+        self.assertEqual([row["member"].user for row in rows], [self.bob, self.alice])
+
+    def test_lifetime_points_use_current_point_total(self):
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=20
+        )
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.FAILURE_PENALTY, points=-5
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(self.get_row(response, self.bob)["lifetime_points"], 15)
+        self.assertEqual(
+            self.get_row(response, self.bob)["lifetime_points"],
+            current_point_total(self.bob),
+        )
+
+    def test_completed_today_count_per_member(self):
+        Chore.objects.create(
+            household=self.household,
+            name="Dishes",
+            points=5,
+            due_date=timezone.localdate(),
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.bob,
+            completed_at=timezone.now(),
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(self.get_row(response, self.bob)["completed_today"], 1)
+        self.assertEqual(self.get_row(response, self.alice)["completed_today"], 0)
+
+    def test_removed_member_does_not_appear(self):
+        bob_membership = Membership.objects.get(household=self.household, user=self.bob)
+        bob_membership.removed_at = timezone.now()
+        bob_membership.save()
+
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("home"))
+
+        member_users = [row["member"].user for row in response.context["leaderboard_rows"]]
+        self.assertNotIn(self.bob, member_users)
+
+    def test_links_to_full_leaderboard(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, reverse("leaderboard"))
+
+
 class MembersViewTests(TestCase):
     def test_is_owner_flag_true_for_owner_false_for_member(self):
         alice = create_user("alice")
