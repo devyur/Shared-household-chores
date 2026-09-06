@@ -187,6 +187,9 @@ def chore_list(request):
     membership = get_active_membership(request.user)
     if not membership:
         return redirect("home")
+    # Lazy-eval hook (#3, §5): auto-assign any due, claimed, still-open
+    # chores before rendering the list — no scheduler involved.
+    membership.household.chores.filter(deleted_at__isnull=True).auto_assign_due()
     chores = membership.household.chores.filter(
         deleted_at__isnull=True
     ).prefetch_related("claims__member")

@@ -5,7 +5,16 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import ActivityLog, Chore, Claim, Household, Membership, RecurrenceRule
+from .models import (
+    ActivityLog,
+    Chore,
+    Claim,
+    Household,
+    Membership,
+    PointEvent,
+    RecurrenceRule,
+    current_point_total,
+)
 
 STRONG_PASSWORD = "aVeryStrongPass1!"
 
@@ -171,6 +180,240 @@ class ChoreCreateNextOccurrenceTests(TestCase):
                 actor__isnull=True,
             ).exists()
         )
+
+
+class CurrentPointTotalTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+
+    def test_member_with_no_point_events_has_zero_total(self):
+        self.assertEqual(current_point_total(self.alice), 0)
+
+    def test_total_sums_signed_point_events(self):
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=20
+        )
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.FAILURE_PENALTY, points=-10
+        )
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.MANUAL_ADJUSTMENT, points=5
+        )
+
+        self.assertEqual(current_point_total(self.alice), 15)
+
+    def test_total_can_go_negative(self):
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.FAILURE_PENALTY, points=-10
+        )
+
+        self.assertEqual(current_point_total(self.alice), -10)
+
+    def test_total_only_counts_the_given_member(self):
+        bob = create_user("bob")
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=100
+        )
+
+        self.assertEqual(current_point_total(bob), 0)
+
+
+class ChoreAutoAssignDueTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        self.carol = create_user("carol")
+        add_member(self.household, self.bob)
+        add_member(self.household, self.carol)
+
+    def make_chore(self, **overrides):
+        defaults = dict(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+        )
+        defaults.update(overrides)
+        return Chore.objects.create(**defaults)
+
+    def run_auto_assign(self):
+        self.household.chores.filter(deleted_at__isnull=True).auto_assign_due()
+
+    def test_due_open_chore_with_one_claim_is_assigned_to_the_claimant(self):
+        chore = self.make_chore()
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_auto_assign()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.ASSIGNED)
+        self.assertEqual(chore.assigned_to, self.bob)
+
+    def test_assigned_to_claimant_with_highest_current_points(self):
+        chore = self.make_chore()
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=10
+        )
+        PointEvent.objects.create(
+            member=self.carol, kind=PointEvent.Kind.COMPLETION, points=50
+        )
+        Claim.objects.create(chore=chore, member=self.bob)
+        Claim.objects.create(chore=chore, member=self.carol)
+
+        self.run_auto_assign()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.assigned_to, self.carol)
+
+    def test_tie_in_points_is_broken_by_earliest_claim(self):
+        chore = self.make_chore()
+        # Equal points (both zero) - earliest claim should win.
+        first_claim = Claim.objects.create(chore=chore, member=self.carol)
+        Claim.objects.filter(pk=first_claim.pk).update(
+            claimed_at=timezone.now() - timedelta(days=1)
+        )
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_auto_assign()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.assigned_to, self.carol)
+
+    def test_due_open_chore_with_zero_claims_stays_open_and_unassigned(self):
+        chore = self.make_chore()
+
+        self.run_auto_assign()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+        self.assertIsNone(chore.assigned_to)
+
+    def test_assignment_is_logged_as_system_triggered(self):
+        chore = self.make_chore()
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_auto_assign()
+
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_ASSIGNED,
+                chore=chore,
+                actor__isnull=True,
+                member=self.bob,
+            ).exists()
+        )
+
+    def test_assignment_does_not_delete_other_claims(self):
+        chore = self.make_chore()
+        Claim.objects.create(chore=chore, member=self.bob)
+        Claim.objects.create(chore=chore, member=self.carol)
+
+        self.run_auto_assign()
+
+        self.assertEqual(chore.claims.count(), 2)
+
+    def test_reevaluating_an_assigned_chore_is_a_noop(self):
+        chore = self.make_chore(
+            status=Chore.Status.ASSIGNED, assigned_to=self.bob
+        )
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_auto_assign()
+        self.run_auto_assign()
+
+        self.assertEqual(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_ASSIGNED,
+                chore=chore,
+            ).count(),
+            0,
+        )
+
+    def test_reevaluating_a_completed_chore_is_a_noop(self):
+        chore = self.make_chore(
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.bob,
+            completed_at=timezone.now(),
+        )
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_auto_assign()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.COMPLETED)
+        self.assertFalse(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_ASSIGNED,
+                chore=chore,
+            ).exists()
+        )
+
+    def test_running_auto_assign_twice_creates_only_one_log_entry(self):
+        chore = self.make_chore()
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_auto_assign()
+        self.run_auto_assign()
+
+        self.assertEqual(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_ASSIGNED,
+                chore=chore,
+            ).count(),
+            1,
+        )
+
+    def test_future_due_date_chore_is_not_assigned(self):
+        chore = self.make_chore(
+            due_date=timezone.localdate() + timedelta(days=5)
+        )
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_auto_assign()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+        self.assertIsNone(chore.assigned_to)
+
+    def test_pushing_due_date_to_the_future_before_assignment_delays_it(self):
+        chore = self.make_chore()
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        chore.due_date = timezone.localdate() + timedelta(days=5)
+        chore.save()
+
+        self.run_auto_assign()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+        self.assertIsNone(chore.assigned_to)
+
+
+class ChoreListAutoAssignViewTests(TestCase):
+    def test_visiting_chore_list_triggers_auto_assignment(self):
+        alice = create_user("alice")
+        household = create_household_with_owner(alice)
+        bob = create_user("bob")
+        add_member(household, bob)
+        chore = Chore.objects.create(
+            household=household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+        )
+        Claim.objects.create(chore=chore, member=bob)
+        self.client.force_login(alice)
+
+        self.client.get(reverse("chore_list"))
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.ASSIGNED)
+        self.assertEqual(chore.assigned_to, bob)
 
 
 class SignupViewTests(TestCase):

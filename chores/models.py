@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 def generate_invite_code():
@@ -69,11 +70,71 @@ class RecurrenceRule(models.Model):
         return f"{self.get_rule_type_display()} every {self.interval_days}d"
 
 
+class ChoreQuerySet(models.QuerySet):
+    def due_for_auto_assignment(self):
+        """OPEN chores in this queryset whose due date has arrived."""
+        return self.filter(
+            status=Chore.Status.OPEN, due_date__lte=timezone.localdate()
+        )
+
+    def auto_assign_due(self):
+        """Lazily auto-assign chores whose due date has arrived (§5, §17.4).
+
+        This is evaluated on read (called from wherever chores are listed,
+        e.g. `chore_list`) rather than by a scheduler/cron/Celery job, per
+        the project's lazy-eval convention.
+
+        For every OPEN chore in this queryset whose `due_date` has arrived
+        and which has one or more claims, assigns it to the claimant with
+        the highest current point total (`current_point_total`) and sets
+        its status to ASSIGNED. Ties are broken deterministically by
+        earliest claim (`claimed_at`). A due OPEN chore with zero claims is
+        left untouched — it stays open/unassigned (§17.15). Chores that
+        are already ASSIGNED or COMPLETED never reach this method (this
+        queryset only considers OPEN chores), so re-evaluating them is a
+        no-op: no re-assignment, no duplicate log entries. Existing claims
+        are never deleted — only `assigned_to`/`status` change.
+        """
+        due_chores = self.due_for_auto_assignment().prefetch_related("claims__member")
+        for chore in due_chores:
+            claims = list(chore.claims.all())
+            if not claims:
+                continue
+
+            winner = claims[0]
+            winner_points = current_point_total(winner.member)
+            for claim in claims[1:]:
+                points = current_point_total(claim.member)
+                if points > winner_points or (
+                    points == winner_points and claim.claimed_at < winner.claimed_at
+                ):
+                    winner = claim
+                    winner_points = points
+
+            chore.assigned_to = winner.member
+            chore.status = Chore.Status.ASSIGNED
+            chore.save(update_fields=["assigned_to", "status"])
+            ActivityLog.objects.create(
+                household=chore.household,
+                actor=None,
+                action=ActivityLog.Action.CHORE_ASSIGNED,
+                chore=chore,
+                member=winner.member,
+                description=(
+                    f"'{chore.name}' automatically assigned to {winner.member} "
+                    "at its due date (highest current points; ties go to the "
+                    "earliest claim)."
+                ),
+            )
+
+
 class Chore(models.Model):
     class Status(models.TextChoices):
         OPEN = "open", "Open"
         ASSIGNED = "assigned", "Assigned"
         COMPLETED = "completed", "Completed"
+
+    objects = ChoreQuerySet.as_manager()
 
     household = models.ForeignKey(
         Household, on_delete=models.CASCADE, related_name="chores"
@@ -220,6 +281,23 @@ class PointEvent(models.Model):
 
     def __str__(self):
         return f"{self.member} {self.points:+d} ({self.kind})"
+
+
+def current_point_total(member):
+    """A member's current point total: the sum of all their `PointEvent`
+    deltas (completions, review adjustments, failure penalties, manual
+    adjustments).
+
+    This is the initial, minimal version of the "current points" primitive
+    needed by #3 (auto-assignment tie-break). The full lifetime point-total
+    calculation — including any leaderboard/summary presentation — is owned
+    by #7; that work should reuse or extend this function rather than
+    forking a second, separate implementation.
+    """
+    total = PointEvent.objects.filter(member=member).aggregate(
+        total=models.Sum("points")
+    )["total"]
+    return total or 0
 
 
 class ActivityLog(models.Model):
