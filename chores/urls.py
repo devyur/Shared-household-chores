@@ -8,6 +8,7 @@ urlpatterns = [
     path("household/create/", views.household_create, name="household_create"),
     path("household/join/", views.household_join, name="household_join"),
     path("household/members/", views.members, name="members"),
+    path("household/leaderboard/", views.leaderboard, name="leaderboard"),
     path("chores/", views.chore_list, name="chore_list"),
     path("chores/new/", views.chore_create, name="chore_create"),
     path("chores/<int:chore_id>/edit/", views.chore_edit, name="chore_edit"),

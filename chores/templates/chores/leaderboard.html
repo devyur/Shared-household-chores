@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Leaderboard{% endblock %}
+{% block content %}
+<h1>{{ household.name }} — Leaderboard</h1>
+
+<p>
+    "Completed today" counts chores completed on {{ today }} (server-local
+    time). The weekly summary covers Monday {{ week_start }} through Sunday
+    {{ week_end }}; the monthly summary covers the current calendar month.
+</p>
+
+{% if rows %}
+<table>
+    <thead>
+        <tr>
+            <th>Rank</th>
+            <th>Member</th>
+            <th>Lifetime points</th>
+            <th>Completed today</th>
+            <th>This week</th>
+            <th>This month</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+        <tr>
+            <td>{{ forloop.counter }}</td>
+            <td>{{ row.member.user.username }}</td>
+            <td>{{ row.lifetime_points }}</td>
+            <td>{{ row.completed_today }}</td>
+            <td>{{ row.weekly_points }}</td>
+            <td>{{ row.monthly_points }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No active household members yet.</p>
+{% endif %}
+{% endblock %}

@@ -378,20 +378,79 @@ def failure_penalty_points(points):
 
 
 def current_point_total(member):
-    """A member's current point total: the sum of all their `PointEvent`
+    """A member's lifetime point total: the sum of all their `PointEvent`
     deltas (completions, review adjustments, failure penalties, manual
-    adjustments).
+    adjustments), computed on read rather than stored redundantly (#7).
 
-    This is the initial, minimal version of the "current points" primitive
-    needed by #3 (auto-assignment tie-break). The full lifetime point-total
-    calculation — including any leaderboard/summary presentation — is owned
-    by #7; that work should reuse or extend this function rather than
-    forking a second, separate implementation.
+    This is the single source of truth for "a member's points" — #3's
+    auto-assignment tie-break and #7's leaderboard both call this rather
+    than each re-summing `PointEvent` independently. A removed member's
+    `PointEvent` rows are never deleted (§2), so this keeps returning their
+    full historical total even after `Membership.removed_at` is set; it's
+    up to callers (e.g. the leaderboard view) to filter out inactive
+    members if they shouldn't be displayed.
     """
     total = PointEvent.objects.filter(member=member).aggregate(
         total=models.Sum("points")
     )["total"]
     return total or 0
+
+
+def week_bounds(day=None):
+    """The (Monday, Sunday) calendar-date bounds, inclusive, of the week
+    containing `day` (default: today).
+
+    Decision (#7 explicitly asks this be documented since plan.md doesn't
+    specify a week boundary): weeks run Monday-Sunday, using Python's/
+    Django's ISO convention where `date.weekday()` is 0 for Monday. "Today"
+    is resolved via `timezone.localdate()`, i.e. server-local time per
+    `settings.TIME_ZONE` — the same basis the rest of the app already uses
+    for due-date/lazy-eval date comparisons (see `ChoreQuerySet` above), and
+    the same basis `chores_completed_on` below uses for "completed today".
+    """
+    day = day or timezone.localdate()
+    start = day - timedelta(days=day.weekday())
+    end = start + timedelta(days=6)
+    return start, end
+
+
+def weekly_point_total(member, day=None):
+    """Sum of `member`'s `PointEvent.points` where `created_at` falls in
+    the current week (Monday-Sunday, server-local — see `week_bounds`).
+
+    Built alongside `current_point_total` as the second point-aggregation
+    primitive #7 asks for, using the same on-read `Sum` approach rather
+    than a stored/cached total.
+    """
+    start, end = week_bounds(day)
+    total = PointEvent.objects.filter(
+        member=member, created_at__date__gte=start, created_at__date__lte=end
+    ).aggregate(total=models.Sum("points"))["total"]
+    return total or 0
+
+
+def monthly_point_total(member, day=None):
+    """Sum of `member`'s `PointEvent.points` where `created_at` falls in
+    the current calendar month (server-local, per `timezone.localdate()`).
+    """
+    day = day or timezone.localdate()
+    total = PointEvent.objects.filter(
+        member=member, created_at__year=day.year, created_at__month=day.month
+    ).aggregate(total=models.Sum("points"))["total"]
+    return total or 0
+
+
+def chores_completed_on(member, day=None):
+    """Count of `member`'s chores with `status=completed` and
+    `completed_at` falling on `day` (default: today, server-local per
+    `timezone.localdate()` — same basis as the rest of this module's
+    date-based lazy-eval checks). Backs the leaderboard's "completed
+    today" column (#7, §9).
+    """
+    day = day or timezone.localdate()
+    return Chore.objects.filter(
+        assigned_to=member, status=Chore.Status.COMPLETED, completed_at__date=day
+    ).count()
 
 
 class ActivityLog(models.Model):

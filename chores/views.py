@@ -16,8 +16,12 @@ from .models import (
     Household,
     Membership,
     PointEvent,
+    chores_completed_on,
     current_point_total,
     generate_invite_code,
+    monthly_point_total,
+    week_bounds,
+    weekly_point_total,
 )
 
 
@@ -157,6 +161,61 @@ def members(request):
             "household": household,
             "members": member_list,
             "is_owner": membership.role == Membership.Role.OWNER,
+        },
+    )
+
+
+@login_required
+def leaderboard(request):
+    """Lifetime-points leaderboard plus today's completed-chore count, and
+    weekly/monthly point summaries, for every *active* household member
+    (#7, §9).
+
+    A removed member never appears here (§2's "points/history remain" is
+    about their `PointEvent` rows staying queryable, e.g. via #9's activity
+    history — not about staying on this live view), so this is built from
+    `removed_at__isnull=True` memberships only, same as `members`/`home`
+    above. All three point figures are computed on read via the shared
+    aggregation helpers in `models.py` (`current_point_total`,
+    `weekly_point_total`, `monthly_point_total`) rather than stored
+    redundantly, and "completed today" via `chores_completed_on` — so a
+    household with zero chores/point events simply renders every active
+    member at 0 across the board, with no special-casing needed here.
+    """
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    household = membership.household
+    active_members = household.memberships.filter(
+        removed_at__isnull=True
+    ).select_related("user")
+
+    today = timezone.localdate()
+    week_start, week_end = week_bounds(today)
+    rows = [
+        {
+            "member": m,
+            "lifetime_points": current_point_total(m.user),
+            "completed_today": chores_completed_on(m.user, today),
+            "weekly_points": weekly_point_total(m.user, today),
+            "monthly_points": monthly_point_total(m.user, today),
+        }
+        for m in active_members
+    ]
+    # Lifetime points descending (§9) — Python-side sort since the three
+    # figures per row come from three separate aggregation calls rather
+    # than one annotated queryset.
+    rows.sort(key=lambda row: row["lifetime_points"], reverse=True)
+
+    return render(
+        request,
+        "chores/leaderboard.html",
+        {
+            "household": household,
+            "rows": rows,
+            "today": today,
+            "week_start": week_start,
+            "week_end": week_end,
         },
     )
 

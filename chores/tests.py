@@ -13,8 +13,12 @@ from .models import (
     Membership,
     PointEvent,
     RecurrenceRule,
+    chores_completed_on,
     current_point_total,
     failure_penalty_points,
+    monthly_point_total,
+    week_bounds,
+    weekly_point_total,
 )
 
 STRONG_PASSWORD = "aVeryStrongPass1!"
@@ -217,6 +221,184 @@ class CurrentPointTotalTests(TestCase):
         )
 
         self.assertEqual(current_point_total(bob), 0)
+
+
+class WeekBoundsTests(TestCase):
+    def test_wednesday_bounds_to_monday_through_sunday(self):
+        # 2026-01-07 is a Wednesday.
+        wednesday = timezone.datetime(2026, 1, 7).date()
+
+        start, end = week_bounds(wednesday)
+
+        self.assertEqual(start, timezone.datetime(2026, 1, 5).date())  # Monday
+        self.assertEqual(end, timezone.datetime(2026, 1, 11).date())  # Sunday
+
+    def test_monday_is_its_own_week_start(self):
+        monday = timezone.datetime(2026, 1, 5).date()
+
+        start, end = week_bounds(monday)
+
+        self.assertEqual(start, monday)
+        self.assertEqual(end, timezone.datetime(2026, 1, 11).date())
+
+    def test_sunday_is_its_own_week_end(self):
+        sunday = timezone.datetime(2026, 1, 11).date()
+
+        start, end = week_bounds(sunday)
+
+        self.assertEqual(start, timezone.datetime(2026, 1, 5).date())
+        self.assertEqual(end, sunday)
+
+
+class WeeklyPointTotalTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        # Treat 2026-01-07 (Wednesday) as "today" for these tests; its week
+        # runs Monday 2026-01-05 through Sunday 2026-01-11.
+        self.today = timezone.datetime(2026, 1, 7).date()
+
+    def set_created_at(self, event, when):
+        PointEvent.objects.filter(pk=event.pk).update(created_at=when)
+
+    def test_zero_when_no_events(self):
+        self.assertEqual(weekly_point_total(self.alice, self.today), 0)
+
+    def test_sums_only_events_within_the_current_week(self):
+        in_week_start = PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=10
+        )
+        self.set_created_at(
+            in_week_start,
+            timezone.datetime(2026, 1, 5, 0, 0, tzinfo=timezone.get_current_timezone()),
+        )
+        in_week_end = PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=5
+        )
+        self.set_created_at(
+            in_week_end,
+            timezone.datetime(2026, 1, 11, 23, 0, tzinfo=timezone.get_current_timezone()),
+        )
+        before_week = PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=100
+        )
+        self.set_created_at(
+            before_week,
+            timezone.datetime(2026, 1, 4, 23, 0, tzinfo=timezone.get_current_timezone()),
+        )
+        after_week = PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=100
+        )
+        self.set_created_at(
+            after_week,
+            timezone.datetime(2026, 1, 12, 0, 0, tzinfo=timezone.get_current_timezone()),
+        )
+
+        self.assertEqual(weekly_point_total(self.alice, self.today), 15)
+
+    def test_only_counts_the_given_member(self):
+        bob = create_user("bob")
+        PointEvent.objects.create(
+            member=bob, kind=PointEvent.Kind.COMPLETION, points=50
+        )
+
+        self.assertEqual(weekly_point_total(self.alice, self.today), 0)
+
+
+class MonthlyPointTotalTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.today = timezone.datetime(2026, 1, 15).date()
+
+    def set_created_at(self, event, when):
+        PointEvent.objects.filter(pk=event.pk).update(created_at=when)
+
+    def test_zero_when_no_events(self):
+        self.assertEqual(monthly_point_total(self.alice, self.today), 0)
+
+    def test_sums_only_events_within_the_current_calendar_month(self):
+        in_month = PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=20
+        )
+        self.set_created_at(
+            in_month,
+            timezone.datetime(2026, 1, 31, 23, 0, tzinfo=timezone.get_current_timezone()),
+        )
+        last_month = PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=100
+        )
+        self.set_created_at(
+            last_month,
+            timezone.datetime(2025, 12, 31, 23, 0, tzinfo=timezone.get_current_timezone()),
+        )
+        next_month = PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=100
+        )
+        self.set_created_at(
+            next_month,
+            timezone.datetime(2026, 2, 1, 0, 0, tzinfo=timezone.get_current_timezone()),
+        )
+
+        self.assertEqual(monthly_point_total(self.alice, self.today), 20)
+
+    def test_only_counts_the_given_member(self):
+        bob = create_user("bob")
+        PointEvent.objects.create(
+            member=bob, kind=PointEvent.Kind.COMPLETION, points=50
+        )
+
+        self.assertEqual(monthly_point_total(self.alice, self.today), 0)
+
+
+class ChoresCompletedOnTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.today = timezone.localdate()
+
+    def make_chore(self, **overrides):
+        defaults = dict(
+            household=self.household,
+            name="Clean kitchen",
+            points=10,
+            due_date=self.today,
+        )
+        defaults.update(overrides)
+        return Chore.objects.create(**defaults)
+
+    def test_zero_when_nothing_completed(self):
+        self.assertEqual(chores_completed_on(self.alice, self.today), 0)
+
+    def test_counts_only_completed_chores_on_the_given_day(self):
+        self.make_chore(
+            name="Completed today",
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.alice,
+            completed_at=timezone.now(),
+        )
+        self.make_chore(
+            name="Completed yesterday",
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.alice,
+            completed_at=timezone.now() - timedelta(days=1),
+        )
+        self.make_chore(
+            name="Still assigned",
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.alice,
+        )
+
+        self.assertEqual(chores_completed_on(self.alice, self.today), 1)
+
+    def test_only_counts_the_given_member(self):
+        bob = create_user("bob")
+        self.make_chore(
+            name="Bob's chore",
+            status=Chore.Status.COMPLETED,
+            assigned_to=bob,
+            completed_at=timezone.now(),
+        )
+
+        self.assertEqual(chores_completed_on(self.alice, self.today), 0)
 
 
 class ChoreAutoAssignDueTests(TestCase):
@@ -570,6 +752,139 @@ class MembersViewTests(TestCase):
         self.client.force_login(bob)
         response = self.client.get(reverse("members"))
         self.assertFalse(response.context["is_owner"])
+
+
+class LeaderboardViewTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def get_row(self, response, user):
+        return next(
+            row for row in response.context["rows"] if row["member"].user_id == user.id
+        )
+
+    def test_anonymous_user_is_redirected_to_login(self):
+        response = self.client.get(reverse("leaderboard"))
+        self.assertNotEqual(response.status_code, 200)
+
+    def test_non_member_is_redirected_home(self):
+        outsider = create_user("outsider")
+        self.client.force_login(outsider)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        self.assertRedirects(
+            response, reverse("home"), target_status_code=302
+        )
+
+    def test_empty_household_renders_every_member_at_zero(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.context["rows"]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["lifetime_points"], 0)
+            self.assertEqual(row["completed_today"], 0)
+            self.assertEqual(row["weekly_points"], 0)
+            self.assertEqual(row["monthly_points"], 0)
+
+    def test_sorted_by_lifetime_points_descending(self):
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=10
+        )
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=50
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        rows = response.context["rows"]
+        self.assertEqual([row["member"].user for row in rows], [self.bob, self.alice])
+
+    def test_lifetime_points_use_current_point_total(self):
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=20
+        )
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.FAILURE_PENALTY, points=-5
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        self.assertEqual(self.get_row(response, self.bob)["lifetime_points"], 15)
+        self.assertEqual(
+            self.get_row(response, self.bob)["lifetime_points"],
+            current_point_total(self.bob),
+        )
+
+    def test_completed_today_count_per_member(self):
+        Chore.objects.create(
+            household=self.household,
+            name="Dishes",
+            points=5,
+            due_date=timezone.localdate(),
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.bob,
+            completed_at=timezone.now(),
+        )
+        Chore.objects.create(
+            household=self.household,
+            name="Laundry",
+            points=5,
+            due_date=timezone.localdate(),
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.bob,
+            completed_at=timezone.now() - timedelta(days=1),
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        self.assertEqual(self.get_row(response, self.bob)["completed_today"], 1)
+        self.assertEqual(self.get_row(response, self.alice)["completed_today"], 0)
+
+    def test_removed_member_does_not_appear(self):
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=100
+        )
+        bob_membership = Membership.objects.get(household=self.household, user=self.bob)
+        bob_membership.removed_at = timezone.now()
+        bob_membership.save()
+
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("leaderboard"))
+
+        member_users = [row["member"].user for row in response.context["rows"]]
+        self.assertNotIn(self.bob, member_users)
+        self.assertNotContains(response, "bob")
+        # Their historical points are untouched, just not shown live (§2).
+        self.assertEqual(current_point_total(self.bob), 100)
+
+    def test_weekly_and_monthly_points_in_context(self):
+        event = PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=30
+        )
+        old_event = PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.COMPLETION, points=999
+        )
+        PointEvent.objects.filter(pk=old_event.pk).update(
+            created_at=timezone.now() - timedelta(days=365)
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        row = self.get_row(response, self.bob)
+        self.assertEqual(row["weekly_points"], 30)
+        self.assertEqual(row["monthly_points"], 30)
 
 
 class RemoveMemberViewTests(TestCase):
