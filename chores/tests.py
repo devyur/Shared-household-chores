@@ -1028,6 +1028,32 @@ class MembersViewTests(TestCase):
         response = self.client.get(reverse("members"))
         self.assertFalse(response.context["is_owner"])
 
+    def test_member_with_negative_lifetime_total_displays_without_error(self):
+        """#12, §17.8: a member whose failure penalties/adjustments have
+        pushed their lifetime total below zero still renders correctly on
+        the members page (no template error on a negative point_total)."""
+        alice = create_user("alice")
+        household = create_household_with_owner(alice)
+        bob = create_user("bob")
+        add_member(household, bob)
+        PointEvent.objects.create(
+            member=bob, kind=PointEvent.Kind.FAILURE_PENALTY, points=-10
+        )
+        PointEvent.objects.create(
+            member=bob,
+            kind=PointEvent.Kind.MANUAL_ADJUSTMENT,
+            points=-5,
+            reason="Left a mess",
+            created_by=alice,
+        )
+        self.assertEqual(current_point_total(bob), -15)
+
+        self.client.force_login(alice)
+        response = self.client.get(reverse("members"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "-15 pts")
+
 
 class LeaderboardViewTests(TestCase):
     def setUp(self):
@@ -1142,6 +1168,27 @@ class LeaderboardViewTests(TestCase):
         self.assertNotContains(response, "bob")
         # Their historical points are untouched, just not shown live (§2).
         self.assertEqual(current_point_total(self.bob), 100)
+
+    def test_member_with_negative_lifetime_total_displays_without_error(self):
+        """#12, §17.8: a member with a negative lifetime total (from a
+        failure penalty here) still appears on the leaderboard, ranked
+        correctly, with no error rendering the negative number."""
+        PointEvent.objects.create(
+            member=self.bob, kind=PointEvent.Kind.FAILURE_PENALTY, points=-10
+        )
+        PointEvent.objects.create(
+            member=self.alice, kind=PointEvent.Kind.COMPLETION, points=5
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.get_row(response, self.bob)["lifetime_points"], -10)
+        # Alice (positive) outranks Bob (negative) in the sorted rows.
+        rows = response.context["rows"]
+        self.assertEqual([row["member"].user for row in rows], [self.alice, self.bob])
+        self.assertContains(response, "-10")
 
     def test_weekly_and_monthly_points_in_context(self):
         event = PointEvent.objects.create(
