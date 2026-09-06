@@ -29,6 +29,11 @@ urlpatterns = [
         name="remove_member",
     ),
     path(
+        "household/members/<int:user_id>/adjust-points/",
+        views.adjust_points,
+        name="adjust_points",
+    ),
+    path(
         "household/invite/regenerate/",
         views.regenerate_invite,
         name="regenerate_invite",

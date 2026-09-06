@@ -17,11 +17,27 @@
 {% for m in members %}
     <li>
         {{ m.user.username }} ({{ m.role }}) — {{ m.point_total }} pts
+        {% if is_owner %}
+        <form method="post" action="{% url 'adjust_points' m.user.id %}" style="display:inline">
+            {% csrf_token %}
+            <input type="number" name="amount" placeholder="+/- points" required>
+            <input type="text" name="reason" placeholder="Reason (required)" required>
+            <button type="submit">Adjust points</button>
+        </form>
+        {% endif %}
         {% if is_owner and m.user_id != request.user.id %}
         <form method="post" action="{% url 'remove_member' m.user.id %}" style="display:inline">
             {% csrf_token %}
             <button type="submit">Remove</button>
         </form>
+        {% endif %}
+        {% if m.point_adjustments %}
+        <br>Point adjustments:
+        <ul>
+        {% for adj in m.point_adjustments %}
+            <li>{{ adj.points|stringformat:"+d" }} pts by {{ adj.created_by }} — {{ adj.reason }}</li>
+        {% endfor %}
+        </ul>
         {% endif %}
     </li>
 {% endfor %}

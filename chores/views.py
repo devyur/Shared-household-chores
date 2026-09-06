@@ -144,6 +144,12 @@ def members(request):
     # render, with no caching to invalidate.
     for m in member_list:
         m.point_total = current_point_total(m.user)
+        # Direct adjustment reasons are visible to every member, not just
+        # the owner (#6, §17.14) — rendered unconditionally in the template,
+        # unlike the adjust-points form itself which is owner-only.
+        m.point_adjustments = PointEvent.objects.filter(
+            member=m.user, kind=PointEvent.Kind.MANUAL_ADJUSTMENT
+        ).order_by("-created_at")
     return render(
         request,
         "chores/members.html",
@@ -196,6 +202,67 @@ def remove_member(request, user_id):
         description=f"{request.user} removed {target_user} from the household.",
     )
     messages.success(request, f"{target_user} was removed from the household.")
+    return redirect("members")
+
+
+@login_required
+def adjust_points(request, user_id):
+    """Direct owner point adjustment (#6, §11, §17.8, §17.13, §17.14).
+
+    Independent of any chore/review (#5's `chore_review_adjust` is the
+    completion-tied, capped path) — this one has no cap per plan.md, can
+    target any active member including the owner themselves, and the
+    resulting total may go negative (§17.8).
+    """
+    membership = get_active_membership(request.user)
+    if not membership or membership.role != Membership.Role.OWNER:
+        return redirect("home")
+    if request.method != "POST":
+        return redirect("members")
+
+    household = membership.household
+    # Only an active member can be targeted (§2, §16): a removed member's
+    # history stays untouched, but no new point event is created against
+    # them once they've left.
+    target_membership = get_object_or_404(
+        Membership, household=household, user_id=user_id, removed_at__isnull=True
+    )
+    target_user = target_membership.user
+
+    reason = (request.POST.get("reason") or "").strip()
+    if not reason:
+        messages.error(request, "A reason is required to adjust points.")
+        return redirect("members")
+
+    try:
+        amount = int(request.POST.get("amount", ""))
+    except (TypeError, ValueError):
+        messages.error(request, "Enter a whole number of points to adjust by.")
+        return redirect("members")
+
+    # No cap here (§11) — unlike #5's ±50%-of-chore-value review-adjustment
+    # ceiling, plan.md places no limit on direct owner adjustments.
+    PointEvent.objects.create(
+        member=target_user,
+        chore=None,
+        kind=PointEvent.Kind.MANUAL_ADJUSTMENT,
+        points=amount,
+        reason=reason,
+        created_by=request.user,
+    )
+    ActivityLog.objects.create(
+        household=household,
+        actor=request.user,
+        action=ActivityLog.Action.POINTS_ADJUSTED,
+        member=target_user,
+        description=(
+            f"{request.user} adjusted {target_user}'s points by {amount:+d} "
+            f"({reason})."
+        ),
+    )
+    messages.success(
+        request, f"Adjusted {target_user}'s points by {amount:+d}."
+    )
     return redirect("members")
 
 

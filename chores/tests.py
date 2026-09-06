@@ -1844,3 +1844,173 @@ class ChoreReviewAdjustViewTests(TestCase):
 
         self.assertContains(response, "Left a mess")
         self.assertContains(response, "-8 pts")
+
+
+class AdjustPointsViewTests(TestCase):
+    """#6, §11, §17.8, §17.13, §17.14: direct owner point adjustments,
+    independent of any chore completion/review."""
+
+    def setUp(self):
+        self.alice = create_user("alice")  # owner
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")  # member
+        self.bob_membership = add_member(self.household, self.bob)
+        self.carol = create_user("carol")  # other member
+        add_member(self.household, self.carol)
+
+    def adjust(self, user, target_id, amount, reason="Extra help this week"):
+        self.client.force_login(user)
+        return self.client.post(
+            reverse("adjust_points", args=[target_id]),
+            {"amount": amount, "reason": reason},
+            follow=True,
+        )
+
+    # -- Visibility / permissions --------------------------------------
+
+    def test_owner_can_adjust_a_members_points(self):
+        self.adjust(self.alice, self.bob.id, 15, "Helped a neighbour move")
+
+        event = PointEvent.objects.get(
+            member=self.bob, kind=PointEvent.Kind.MANUAL_ADJUSTMENT
+        )
+        self.assertEqual(event.points, 15)
+        self.assertEqual(event.reason, "Helped a neighbour move")
+        self.assertEqual(event.created_by, self.alice)
+        self.assertIsNone(event.chore)
+
+    def test_owner_can_adjust_their_own_points(self):
+        self.adjust(self.alice, self.alice.id, 10, "Owner did chores too")
+
+        self.assertTrue(
+            PointEvent.objects.filter(
+                member=self.alice,
+                kind=PointEvent.Kind.MANUAL_ADJUSTMENT,
+                points=10,
+                created_by=self.alice,
+            ).exists()
+        )
+
+    def test_non_owner_member_cannot_adjust_points(self):
+        self.adjust(self.bob, self.carol.id, 10, "Trying to cheat")
+
+        self.assertFalse(
+            PointEvent.objects.filter(kind=PointEvent.Kind.MANUAL_ADJUSTMENT).exists()
+        )
+
+    def test_get_request_does_not_adjust(self):
+        self.client.force_login(self.alice)
+        self.client.get(reverse("adjust_points", args=[self.bob.id]))
+
+        self.assertFalse(
+            PointEvent.objects.filter(kind=PointEvent.Kind.MANUAL_ADJUSTMENT).exists()
+        )
+
+    def test_adjust_points_form_shown_only_to_owner(self):
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("members"))
+        self.assertContains(
+            response, f'action="{reverse("adjust_points", args=[self.bob.id])}"'
+        )
+
+        self.client.force_login(self.bob)
+        response = self.client.get(reverse("members"))
+        self.assertNotContains(
+            response, f'action="{reverse("adjust_points", args=[self.bob.id])}"'
+        )
+
+    # -- Reason requirement -----------------------------------------------
+
+    def test_empty_reason_is_rejected(self):
+        self.adjust(self.alice, self.bob.id, 10, "")
+
+        self.assertFalse(
+            PointEvent.objects.filter(kind=PointEvent.Kind.MANUAL_ADJUSTMENT).exists()
+        )
+
+    def test_whitespace_only_reason_is_rejected(self):
+        self.adjust(self.alice, self.bob.id, 10, "   ")
+
+        self.assertFalse(
+            PointEvent.objects.filter(kind=PointEvent.Kind.MANUAL_ADJUSTMENT).exists()
+        )
+
+    # -- No cap, can go negative ----------------------------------------
+
+    def test_large_positive_adjustment_has_no_cap(self):
+        self.adjust(self.alice, self.bob.id, 500, "Went above and beyond")
+
+        self.assertTrue(
+            PointEvent.objects.filter(
+                member=self.bob, kind=PointEvent.Kind.MANUAL_ADJUSTMENT, points=500
+            ).exists()
+        )
+
+    def test_large_negative_adjustment_has_no_cap(self):
+        self.adjust(self.alice, self.bob.id, -500, "Serious violation")
+
+        self.assertTrue(
+            PointEvent.objects.filter(
+                member=self.bob, kind=PointEvent.Kind.MANUAL_ADJUSTMENT, points=-500
+            ).exists()
+        )
+
+    def test_total_can_go_negative(self):
+        self.adjust(self.alice, self.bob.id, -30, "Way over budget")
+
+        self.assertEqual(current_point_total(self.bob), -30)
+
+    # -- Removed members --------------------------------------------------
+
+    def test_removed_member_cannot_be_targeted(self):
+        self.bob_membership.removed_at = timezone.now()
+        self.bob_membership.save(update_fields=["removed_at"])
+
+        response = self.adjust(self.alice, self.bob.id, 10, "Too late")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(
+            PointEvent.objects.filter(kind=PointEvent.Kind.MANUAL_ADJUSTMENT).exists()
+        )
+
+    def test_removed_members_prior_history_is_untouched(self):
+        self.adjust(self.alice, self.bob.id, 20, "Before leaving")
+        self.bob_membership.removed_at = timezone.now()
+        self.bob_membership.save(update_fields=["removed_at"])
+
+        self.assertTrue(
+            PointEvent.objects.filter(
+                member=self.bob, kind=PointEvent.Kind.MANUAL_ADJUSTMENT, points=20
+            ).exists()
+        )
+        self.assertEqual(current_point_total(self.bob), 20)
+
+    # -- ActivityLog & visibility to all members --------------------------
+
+    def test_adjustment_is_logged_to_activity_log(self):
+        self.adjust(self.alice, self.bob.id, -5, "Left dishes dirty")
+
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.POINTS_ADJUSTED,
+                actor=self.alice,
+                member=self.bob,
+            ).exists()
+        )
+
+    def test_reason_visible_to_every_member_on_members_page(self):
+        self.adjust(self.alice, self.bob.id, -5, "Left dishes dirty")
+
+        self.client.force_login(self.carol)
+        response = self.client.get(reverse("members"))
+
+        self.assertContains(response, "Left dishes dirty")
+        self.assertContains(response, "-5 pts")
+
+    def test_member_point_total_reflects_adjustment_immediately(self):
+        self.assertEqual(current_point_total(self.bob), 0)
+
+        self.adjust(self.alice, self.bob.id, 7, "Nice work")
+
+        self.assertEqual(current_point_total(self.bob), 7)
