@@ -42,6 +42,28 @@
             {% endif %}
             <br>
         {% endif %}
+        {% if chore.status == "completed" %}
+            Completed by: {{ chore.assigned_to }}
+            {% if chore.review_adjustments %}
+                <br>Review adjustments:
+                <ul>
+                {% for adj in chore.review_adjustments %}
+                    <li>{{ adj.points|stringformat:"+d" }} pts by {{ adj.created_by }} — {{ adj.reason }}</li>
+                {% endfor %}
+                </ul>
+            {% endif %}
+            {% if chore.can_review %}
+                <form method="post" action="{% url 'chore_review_adjust' chore.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <input type="number" name="delta" placeholder="+/- points" required>
+                    <input type="text" name="reason" placeholder="Reason (required)" required>
+                    <button type="submit">Adjust points</button>
+                </form>
+            {% elif is_owner %}
+                <br><em>Review window closed — points are locked.</em>
+            {% endif %}
+            <br>
+        {% endif %}
         <a href="{% url 'chore_edit' chore.id %}">Edit</a>
         <form method="post" action="{% url 'chore_delete' chore.id %}" style="display:inline">
             {% csrf_token %}

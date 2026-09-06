@@ -16,7 +16,7 @@
 <ul>
 {% for m in members %}
     <li>
-        {{ m.user.username }} ({{ m.role }})
+        {{ m.user.username }} ({{ m.role }}) — {{ m.point_total }} pts
         {% if is_owner and m.user_id != request.user.id %}
         <form method="post" action="{% url 'remove_member' m.user.id %}" style="display:inline">
             {% csrf_token %}

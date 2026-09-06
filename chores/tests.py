@@ -1517,3 +1517,330 @@ class ChoreCompleteViewTests(TestCase):
         )
         self.chore.refresh_from_db()
         self.assertEqual(self.chore.status, Chore.Status.ASSIGNED)
+
+
+class ChoreReviewAdjustViewTests(TestCase):
+    """#5, §7, §17.9-§17.12: owner review window and point adjustments."""
+
+    def setUp(self):
+        self.alice = create_user("alice")  # owner
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")  # assignee/member
+        self.carol = create_user("carol")  # other member
+        add_member(self.household, self.bob)
+        add_member(self.household, self.carol)
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        self.client.force_login(self.bob)
+        self.client.post(reverse("chore_complete", args=[self.chore.id]))
+        self.chore.refresh_from_db()
+        self.completion_event = PointEvent.objects.get(
+            chore=self.chore, kind=PointEvent.Kind.COMPLETION
+        )
+        self.client.logout()
+
+    def adjust(self, user, delta, reason="Did a great job"):
+        self.client.force_login(user)
+        return self.client.post(
+            reverse("chore_review_adjust", args=[self.chore.id]),
+            {"delta": delta, "reason": reason},
+            follow=True,
+        )
+
+    # -- Visibility / permissions --------------------------------------
+
+    def test_owner_can_submit_a_valid_adjustment(self):
+        self.adjust(self.alice, 5, "Extra thorough")
+
+        event = PointEvent.objects.get(
+            chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+        )
+        self.assertEqual(event.member, self.bob)
+        self.assertEqual(event.points, 5)
+        self.assertEqual(event.reason, "Extra thorough")
+        self.assertEqual(event.created_by, self.alice)
+        # Separate from, not a replacement of, the original award (§7/§17.9).
+        self.completion_event.refresh_from_db()
+        self.assertEqual(self.completion_event.points, 20)
+        self.assertEqual(
+            PointEvent.objects.filter(chore=self.chore).count(), 2
+        )
+
+    def test_non_owner_member_cannot_submit_adjustment(self):
+        self.adjust(self.carol, 5, "Nice try")
+
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_assignee_cannot_adjust_their_own_completion(self):
+        self.adjust(self.bob, 5, "Self review")
+
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_get_request_does_not_adjust(self):
+        self.client.force_login(self.alice)
+        self.client.get(reverse("chore_review_adjust", args=[self.chore.id]))
+
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_adjustment_rejected_for_a_chore_that_is_not_completed(self):
+        other = Chore.objects.create(
+            household=self.household,
+            name="Mow lawn",
+            points=10,
+            due_date=timezone.localdate(),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        self.client.force_login(self.alice)
+        self.client.post(
+            reverse("chore_review_adjust", args=[other.id]),
+            {"delta": 2, "reason": "Premature"},
+        )
+
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=other, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_review_adjust_button_shown_only_to_owner(self):
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("chore_list"))
+        self.assertContains(
+            response,
+            f'action="{reverse("chore_review_adjust", args=[self.chore.id])}"',
+        )
+
+        self.client.force_login(self.bob)
+        response = self.client.get(reverse("chore_list"))
+        self.assertNotContains(
+            response,
+            f'action="{reverse("chore_review_adjust", args=[self.chore.id])}"',
+        )
+
+    # -- Reason requirement -----------------------------------------------
+
+    def test_empty_reason_is_rejected(self):
+        self.adjust(self.alice, 5, "")
+
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_whitespace_only_reason_is_rejected(self):
+        self.adjust(self.alice, 5, "   ")
+
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    # -- ±50%-of-chore.points cap -------------------------------------
+
+    def test_adjustment_within_50_percent_cap_is_accepted(self):
+        # chore.points == 20 -> cap is 10.
+        self.adjust(self.alice, 10, "Max positive")
+        self.adjust(self.bob, 0)  # no-op, just to be safe about isolation
+        self.assertTrue(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT, points=10
+            ).exists()
+        )
+
+    def test_negative_adjustment_within_cap_is_accepted(self):
+        self.adjust(self.alice, -10, "Max negative")
+        self.assertTrue(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT, points=-10
+            ).exists()
+        )
+
+    def test_adjustment_exceeding_50_percent_cap_is_rejected(self):
+        self.adjust(self.alice, 11, "Too much")
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_negative_adjustment_exceeding_cap_is_rejected(self):
+        self.adjust(self.alice, -11, "Too harsh")
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_cap_is_floored_for_an_odd_chore_point_value(self):
+        # 15 points -> 50% is 7.5; the cap must never round up to 8.
+        self.chore.points = 15
+        self.chore.save(update_fields=["points"])
+
+        self.adjust(self.alice, 8, "Rounds up over the line")
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+        self.adjust(self.alice, 7, "Right at the floor")
+        self.assertTrue(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT, points=7
+            ).exists()
+        )
+
+    def test_zero_delta_is_rejected(self):
+        self.adjust(self.alice, 0, "No change")
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    # -- Multiple adjustments: cumulative cap (documented decision) -------
+
+    def test_multiple_adjustments_are_allowed_within_the_cumulative_cap(self):
+        self.adjust(self.alice, 6, "First pass")
+        self.adjust(self.alice, 4, "Second pass")  # total +10, at the cap
+
+        events = PointEvent.objects.filter(
+            chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+        )
+        self.assertEqual(events.count(), 2)
+        self.assertEqual(sum(e.points for e in events), 10)
+
+    def test_second_adjustment_exceeding_cumulative_cap_is_rejected(self):
+        self.adjust(self.alice, 6, "First pass")
+        self.adjust(self.alice, 5, "Second pass pushes past the cap")  # 6+5=11 > 10
+
+        events = PointEvent.objects.filter(
+            chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+        )
+        self.assertEqual(events.count(), 1)
+        self.assertEqual(events.first().points, 6)
+
+    def test_opposite_sign_adjustments_can_offset_within_cumulative_cap(self):
+        self.adjust(self.alice, 10, "Bumped up to the cap")
+        self.adjust(self.alice, -15, "Correcting the previous adjustment")
+
+        events = PointEvent.objects.filter(
+            chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+        )
+        self.assertEqual(events.count(), 2)
+        self.assertEqual(sum(e.points for e in events), -5)
+
+    # -- 24h deadline: hidden/disabled in UI, rejected server-side --------
+
+    def test_button_hidden_once_deadline_has_passed(self):
+        PointEvent.objects.filter(id=self.completion_event.id).update(
+            review_deadline=timezone.now() - timedelta(seconds=1)
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("chore_list"))
+
+        self.assertNotContains(
+            response,
+            f'action="{reverse("chore_review_adjust", args=[self.chore.id])}"',
+        )
+        self.assertContains(response, "locked")
+
+    def test_submission_after_deadline_is_rejected_server_side(self):
+        PointEvent.objects.filter(id=self.completion_event.id).update(
+            review_deadline=timezone.now() - timedelta(seconds=1)
+        )
+
+        # A crafted POST straight to the endpoint, bypassing the UI entirely.
+        self.adjust(self.alice, 5, "Too late")
+
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    def test_submission_right_before_deadline_is_accepted(self):
+        PointEvent.objects.filter(id=self.completion_event.id).update(
+            review_deadline=timezone.now() + timedelta(seconds=30)
+        )
+
+        self.adjust(self.alice, 5, "Just in time")
+
+        self.assertTrue(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.REVIEW_ADJUSTMENT
+            ).exists()
+        )
+
+    # -- ActivityLog & displayed totals -------------------------------
+
+    def test_adjustment_is_logged_to_activity_log(self):
+        self.adjust(self.alice, -5, "Left a mess")
+
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.POINTS_ADJUSTED,
+                chore=self.chore,
+                actor=self.alice,
+                member=self.bob,
+            ).exists()
+        )
+
+    def test_activity_log_entry_is_not_owner_restricted(self):
+        """The log entry itself carries no owner-only flag, so whenever/
+        wherever activity history is surfaced (a later issue's concern) it
+        is visible to every member, per §17.14 — not gated to the owner."""
+        self.adjust(self.alice, -5, "Left a mess")
+
+        log = ActivityLog.objects.get(
+            household=self.household, action=ActivityLog.Action.POINTS_ADJUSTED
+        )
+        self.assertIn("alice", log.description.lower())
+        self.assertIn("-5", log.description)
+
+    def test_member_point_total_reflects_adjustment_immediately(self):
+        self.assertEqual(current_point_total(self.bob), 20)
+
+        self.adjust(self.alice, -8, "Left a mess")
+
+        self.assertEqual(current_point_total(self.bob), 12)
+
+    def test_members_page_shows_updated_total_immediately(self):
+        self.adjust(self.alice, -8, "Left a mess")
+
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("members"))
+
+        self.assertContains(response, "12 pts")
+
+    def test_review_adjustment_visible_on_chore_list_to_all_members(self):
+        self.adjust(self.alice, -8, "Left a mess")
+
+        self.client.force_login(self.carol)
+        response = self.client.get(reverse("chore_list"))
+
+        self.assertContains(response, "Left a mess")
+        self.assertContains(response, "-8 pts")

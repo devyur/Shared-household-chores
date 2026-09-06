@@ -4,6 +4,7 @@ from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError, transaction
+from django.db.models import Sum
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
@@ -15,6 +16,7 @@ from .models import (
     Household,
     Membership,
     PointEvent,
+    current_point_total,
     generate_invite_code,
 )
 
@@ -137,6 +139,11 @@ def members(request):
     member_list = household.memberships.filter(
         removed_at__isnull=True
     ).select_related("user")
+    # Always computed fresh from PointEvent (#5, #7): any review adjustment
+    # submitted via chore_review_adjust is reflected here on the very next
+    # render, with no caching to invalidate.
+    for m in member_list:
+        m.point_total = current_point_total(m.user)
     return render(
         request,
         "chores/members.html",
@@ -209,7 +216,9 @@ def chore_list(request):
     household_chores.auto_assign_due()
     chores = membership.household.chores.filter(
         deleted_at__isnull=True
-    ).prefetch_related("claims__member")
+    ).prefetch_related("claims__member", "point_events")
+    is_owner = membership.role == Membership.Role.OWNER
+    now = timezone.now()
     for chore in chores:
         chore.user_has_claimed = any(
             claim.member_id == request.user.id for claim in chore.claims.all()
@@ -218,11 +227,148 @@ def chore_list(request):
             chore.status == Chore.Status.ASSIGNED
             and chore.assigned_to_id == request.user.id
         )
+        # Owner review window (#5, §7, §17.9-§17.12): the adjustment action
+        # is only ever offered here for a `completed` chore whose completion
+        # PointEvent's `review_deadline` hasn't passed yet. This only
+        # controls whether the form renders — `chore_review_adjust` below
+        # re-checks all of this server-side, since a POST can be crafted
+        # directly regardless of what the UI shows.
+        completion_event = next(
+            (
+                pe
+                for pe in chore.point_events.all()
+                if pe.kind == PointEvent.Kind.COMPLETION
+            ),
+            None,
+        )
+        chore.review_adjustments = [
+            pe
+            for pe in chore.point_events.all()
+            if pe.kind == PointEvent.Kind.REVIEW_ADJUSTMENT
+        ]
+        chore.can_review = bool(
+            is_owner
+            and chore.status == Chore.Status.COMPLETED
+            and completion_event
+            and completion_event.review_deadline
+            and now < completion_event.review_deadline
+        )
     return render(
         request,
         "chores/chore_list.html",
-        {"household": membership.household, "chores": chores},
+        {"household": membership.household, "chores": chores, "is_owner": is_owner},
     )
+
+
+@login_required
+def chore_review_adjust(request, chore_id):
+    """Owner review adjustment on a completed chore (#5, §7, §17.9-§17.12).
+
+    Decision (documented per the issue's explicit ask): the owner MAY submit
+    more than one adjustment per completion within the 24h window — nothing
+    in plan.md forbids it, and an owner correcting their own earlier
+    adjustment is a reasonable case. To prevent a string of small
+    adjustments from bypassing the ±50%-of-`chore.points` ceiling, the cap
+    below is enforced on the *cumulative* total of all `review_adjustment`
+    events for this chore's completion (existing total + this delta), not
+    just on the individual delta.
+    """
+    membership = get_active_membership(request.user)
+    if not membership or membership.role != Membership.Role.OWNER:
+        return redirect("chore_list")
+    if request.method != "POST":
+        return redirect("chore_list")
+
+    chore = get_object_or_404(
+        Chore,
+        id=chore_id,
+        household=membership.household,
+        deleted_at__isnull=True,
+    )
+    if chore.status != Chore.Status.COMPLETED or chore.assigned_to_id is None:
+        messages.error(request, f"'{chore.name}' isn't completed yet.")
+        return redirect("chore_list")
+
+    completion_event = (
+        chore.point_events.filter(kind=PointEvent.Kind.COMPLETION)
+        .order_by("-created_at")
+        .first()
+    )
+    if completion_event is None or completion_event.review_deadline is None:
+        messages.error(request, f"'{chore.name}' has no completion to review.")
+        return redirect("chore_list")
+
+    # Mandatory server-side lock (§17.12) — not just a hidden/disabled
+    # button. This is the same lazy, read/submit-time check the rest of the
+    # app uses for due-date-triggered state (no scheduler involved): the
+    # deadline is simply compared against `now()` at submit time.
+    if timezone.now() >= completion_event.review_deadline:
+        messages.error(
+            request,
+            f"The 24-hour review window for '{chore.name}' has passed; "
+            "its points are locked.",
+        )
+        return redirect("chore_list")
+
+    reason = (request.POST.get("reason") or "").strip()
+    if not reason:
+        messages.error(request, "A reason is required to adjust points.")
+        return redirect("chore_list")
+
+    try:
+        delta = int(request.POST.get("delta", ""))
+    except (TypeError, ValueError):
+        messages.error(request, "Enter a whole number of points to adjust by.")
+        return redirect("chore_list")
+
+    if delta == 0:
+        messages.error(request, "Enter a non-zero point adjustment.")
+        return redirect("chore_list")
+
+    # ±50% of the chore's *original* point value (§7, §17.10) — floored
+    # (integer division) so an odd point value (e.g. 15 -> 7.5) never lets
+    # the cap round *up* past the stated 50% ceiling.
+    cap = chore.points // 2
+
+    existing_total = (
+        chore.point_events.filter(kind=PointEvent.Kind.REVIEW_ADJUSTMENT).aggregate(
+            total=Sum("points")
+        )["total"]
+        or 0
+    )
+    new_total = existing_total + delta
+    if abs(new_total) > cap:
+        messages.error(
+            request,
+            f"That adjustment would bring the total review adjustment for "
+            f"'{chore.name}' to {new_total:+d}, outside the ±{cap} cap "
+            f"(50% of {chore.points} points).",
+        )
+        return redirect("chore_list")
+
+    PointEvent.objects.create(
+        member=chore.assigned_to,
+        chore=chore,
+        kind=PointEvent.Kind.REVIEW_ADJUSTMENT,
+        points=delta,
+        reason=reason,
+        created_by=request.user,
+    )
+    ActivityLog.objects.create(
+        household=membership.household,
+        actor=request.user,
+        action=ActivityLog.Action.POINTS_ADJUSTED,
+        chore=chore,
+        member=chore.assigned_to,
+        description=(
+            f"{request.user} adjusted {chore.assigned_to}'s points for "
+            f"'{chore.name}' by {delta:+d} ({reason})."
+        ),
+    )
+    messages.success(
+        request, f"Adjusted {chore.assigned_to}'s points by {delta:+d}."
+    )
+    return redirect("chore_list")
 
 
 @login_required
