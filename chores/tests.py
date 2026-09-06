@@ -401,6 +401,26 @@ class RemoveMemberViewTests(TestCase):
         )
         self.assertRedirects(response, reverse("members"))
 
+    def test_removing_one_claimant_leaves_other_claimants_and_chore_open(self):
+        carol = create_user("carol")
+        add_member(self.household, carol)
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Take out trash",
+            points=5,
+            due_date=timezone.localdate(),
+        )
+        Claim.objects.create(chore=chore, member=self.bob)
+        Claim.objects.create(chore=chore, member=carol)
+
+        self.client.force_login(self.alice)
+        self.client.post(reverse("remove_member", args=[self.bob.id]), follow=True)
+
+        self.assertFalse(Claim.objects.filter(chore=chore, member=self.bob).exists())
+        self.assertTrue(Claim.objects.filter(chore=chore, member=carol).exists())
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+
     def test_owner_cannot_remove_self(self):
         self.client.force_login(self.alice)
 
