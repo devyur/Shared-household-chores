@@ -1,6 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
+from django.db import IntegrityError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
@@ -186,7 +187,13 @@ def chore_list(request):
     membership = get_active_membership(request.user)
     if not membership:
         return redirect("home")
-    chores = membership.household.chores.filter(deleted_at__isnull=True)
+    chores = membership.household.chores.filter(
+        deleted_at__isnull=True
+    ).prefetch_related("claims__member")
+    for chore in chores:
+        chore.user_has_claimed = any(
+            claim.member_id == request.user.id for claim in chore.claims.all()
+        )
     return render(
         request,
         "chores/chore_list.html",
@@ -283,6 +290,69 @@ def chore_delete(request, chore_id):
         description=f"{request.user} deleted chore '{chore.name}'.",
     )
     messages.success(request, f"'{chore.name}' was deleted.")
+    return redirect("chore_list")
+
+
+@login_required
+def chore_claim(request, chore_id):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    if request.method != "POST":
+        return redirect("chore_list")
+
+    chore = get_object_or_404(
+        Chore,
+        id=chore_id,
+        household=membership.household,
+        deleted_at__isnull=True,
+    )
+    if chore.status != Chore.Status.OPEN:
+        messages.error(request, f"'{chore.name}' is no longer open for claiming.")
+        return redirect("chore_list")
+
+    try:
+        Claim.objects.create(chore=chore, member=request.user)
+    except IntegrityError:
+        # unique_together(chore, member) — already claimed, not an error state.
+        messages.info(request, f"You already claimed '{chore.name}'.")
+    else:
+        ActivityLog.objects.create(
+            household=membership.household,
+            actor=request.user,
+            action=ActivityLog.Action.CHORE_CLAIMED,
+            chore=chore,
+            description=f"{request.user} claimed chore '{chore.name}'.",
+        )
+        messages.success(request, f"You claimed '{chore.name}'.")
+    return redirect("chore_list")
+
+
+@login_required
+def chore_unclaim(request, chore_id):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    if request.method != "POST":
+        return redirect("chore_list")
+
+    chore = get_object_or_404(
+        Chore,
+        id=chore_id,
+        household=membership.household,
+        deleted_at__isnull=True,
+    )
+    if chore.status != Chore.Status.OPEN:
+        messages.error(request, f"'{chore.name}' is no longer open.")
+        return redirect("chore_list")
+
+    # Withdrawing a claim has no point/status effect (§5) and is not logged:
+    # there's no ActivityLog.Action for it, and unlike claiming, editing, or
+    # deleting a chore, plan.md §13 doesn't list "unclaimed" among the
+    # required audit events.
+    deleted_count, _ = Claim.objects.filter(chore=chore, member=request.user).delete()
+    if deleted_count:
+        messages.success(request, f"You withdrew your claim on '{chore.name}'.")
     return redirect("chore_list")
 
 

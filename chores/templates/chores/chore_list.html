@@ -12,6 +12,26 @@
         ({{ chore.get_status_display }}{% if chore.is_recurring %}, recurring{% endif %})
         {% if chore.description %}<br>{{ chore.description }}{% endif %}
         <br>
+        {% if chore.claims.all %}
+            Claimed by:
+            {% for claim in chore.claims.all %}{{ claim.member }}{% if not forloop.last %}, {% endif %}{% endfor %}
+        {% else %}
+            No claims yet.
+        {% endif %}
+        <br>
+        {% if chore.status == "open" %}
+            {% if chore.user_has_claimed %}
+                <form method="post" action="{% url 'chore_unclaim' chore.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <button type="submit">Withdraw claim</button>
+                </form>
+            {% else %}
+                <form method="post" action="{% url 'chore_claim' chore.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <button type="submit">Claim</button>
+                </form>
+            {% endif %}
+        {% endif %}
         <a href="{% url 'chore_edit' chore.id %}">Edit</a>
         <form method="post" action="{% url 'chore_delete' chore.id %}" style="display:inline">
             {% csrf_token %}
