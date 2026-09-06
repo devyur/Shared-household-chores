@@ -527,3 +527,81 @@ class MemberAchievement(models.Model):
 
     def __str__(self):
         return f"{self.member} earned {self.achievement}"
+
+
+# Achievement rules (#8, §10/§18 — plan.md deliberately leaves the exact
+# rules as an implementation detail; these are the 3 concrete ones chosen,
+# each with a specific number per the issue's explicit ask):
+#
+# - "First Chore": the member's first-ever chore completion.
+# - "On a Roll": ON_A_ROLL_COUNT (5) chores completed within a rolling
+#   ON_A_ROLL_WINDOW_DAYS (7)-day window ending now.
+# - "Point Milestone": lifetime points (`current_point_total`) reach
+#   POINT_MILESTONE_THRESHOLD (100).
+#
+# `Achievement` rows for these names are seeded by a data migration (see
+# chores/migrations/0003_seed_achievements.py) so they exist without manual
+# admin setup.
+FIRST_CHORE = "First Chore"
+ON_A_ROLL = "On a Roll"
+POINT_MILESTONE = "Point Milestone"
+
+ON_A_ROLL_COUNT = 5
+ON_A_ROLL_WINDOW_DAYS = 7
+POINT_MILESTONE_THRESHOLD = 100
+
+ACHIEVEMENT_DEFINITIONS = [
+    (FIRST_CHORE, "Complete your first chore."),
+    (
+        ON_A_ROLL,
+        f"Complete {ON_A_ROLL_COUNT} chores within a rolling "
+        f"{ON_A_ROLL_WINDOW_DAYS}-day window.",
+    ),
+    (POINT_MILESTONE, f"Reach {POINT_MILESTONE_THRESHOLD} lifetime points."),
+]
+
+
+def _award_achievement(member, name):
+    """Award the named achievement to `member` if it isn't already earned.
+
+    A no-op (not an error) if the `Achievement` row doesn't exist (seeding
+    failed/hasn't run) or the member already has it — `MemberAchievement`'s
+    `unique_together(member, achievement)` makes `get_or_create` here
+    naturally idempotent, matching the issue's "re-triggering the same
+    condition later is a no-op" requirement.
+    """
+    try:
+        achievement = Achievement.objects.get(name=name)
+    except Achievement.DoesNotExist:
+        return
+    MemberAchievement.objects.get_or_create(member=member, achievement=achievement)
+
+
+def evaluate_achievements(member):
+    """Check all achievement rules for `member` and award any newly met
+    ones (#8).
+
+    Called right after the events that could trigger an achievement —
+    chore completion (`chore_complete`, #4) and point changes
+    (`chore_review_adjust` #5, `adjust_points` #6) — not via a poll or
+    scheduler, consistent with this project's event-driven convention
+    (`_docs/AGENTS.md`). Awarding never changes any point total; this only
+    ever creates `MemberAchievement` badge rows.
+    """
+    completed_count = Chore.objects.filter(
+        assigned_to=member, status=Chore.Status.COMPLETED
+    ).count()
+    if completed_count >= 1:
+        _award_achievement(member, FIRST_CHORE)
+
+    window_start = timezone.now() - timedelta(days=ON_A_ROLL_WINDOW_DAYS)
+    recent_completions = Chore.objects.filter(
+        assigned_to=member,
+        status=Chore.Status.COMPLETED,
+        completed_at__gte=window_start,
+    ).count()
+    if recent_completions >= ON_A_ROLL_COUNT:
+        _award_achievement(member, ON_A_ROLL)
+
+    if current_point_total(member) >= POINT_MILESTONE_THRESHOLD:
+        _award_achievement(member, POINT_MILESTONE)

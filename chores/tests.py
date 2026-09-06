@@ -6,15 +6,20 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
+    ON_A_ROLL_COUNT,
+    POINT_MILESTONE_THRESHOLD,
+    Achievement,
     ActivityLog,
     Chore,
     Claim,
     Household,
+    MemberAchievement,
     Membership,
     PointEvent,
     RecurrenceRule,
     chores_completed_on,
     current_point_total,
+    evaluate_achievements,
     failure_penalty_points,
     monthly_point_total,
     week_bounds,
@@ -2329,3 +2334,377 @@ class AdjustPointsViewTests(TestCase):
         self.adjust(self.alice, self.bob.id, 7, "Nice work")
 
         self.assertEqual(current_point_total(self.bob), 7)
+
+
+class AchievementSeedMigrationTests(TestCase):
+    """The 3 chosen achievement rules (#8, §10) exist as `Achievement` rows
+    without any manual admin setup, seeded by
+    chores/migrations/0003_seed_achievements.py."""
+
+    def test_seeded_achievements_exist(self):
+        names = set(Achievement.objects.values_list("name", flat=True))
+        self.assertEqual(names, {"First Chore", "On a Roll", "Point Milestone"})
+
+
+class EvaluateAchievementsTests(TestCase):
+    """#8, §10: the 3 chosen achievement rules and their exact numbers —
+    "First Chore" (first-ever completion), "On a Roll"
+    (ON_A_ROLL_COUNT=5 completions within a rolling ON_A_ROLL_WINDOW_DAYS=7
+    day window), "Point Milestone" (lifetime points reach
+    POINT_MILESTONE_THRESHOLD=100)."""
+
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def make_completed_chore(self, member, completed_at=None, points=10, name="Chore"):
+        return Chore.objects.create(
+            household=self.household,
+            name=name,
+            points=points,
+            due_date=timezone.localdate(),
+            status=Chore.Status.COMPLETED,
+            assigned_to=member,
+            completed_at=completed_at or timezone.now(),
+        )
+
+    # -- First Chore ------------------------------------------------------
+
+    def test_first_chore_awarded_on_first_completion(self):
+        self.make_completed_chore(self.bob)
+
+        evaluate_achievements(self.bob)
+
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="First Chore"
+            ).exists()
+        )
+
+    def test_first_chore_not_awarded_with_zero_completions(self):
+        evaluate_achievements(self.bob)
+
+        self.assertFalse(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="First Chore"
+            ).exists()
+        )
+
+    # -- On a Roll ----------------------------------------------------------
+
+    def test_on_a_roll_awarded_after_threshold_completions_in_window(self):
+        now = timezone.now()
+        for i in range(ON_A_ROLL_COUNT):
+            self.make_completed_chore(
+                self.bob, completed_at=now - timedelta(days=i), name=f"Chore {i}"
+            )
+
+        evaluate_achievements(self.bob)
+
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="On a Roll"
+            ).exists()
+        )
+
+    def test_on_a_roll_not_awarded_before_threshold(self):
+        now = timezone.now()
+        for i in range(ON_A_ROLL_COUNT - 1):
+            self.make_completed_chore(
+                self.bob, completed_at=now - timedelta(days=i), name=f"Chore {i}"
+            )
+
+        evaluate_achievements(self.bob)
+
+        self.assertFalse(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="On a Roll"
+            ).exists()
+        )
+
+    def test_on_a_roll_ignores_completions_outside_the_window(self):
+        now = timezone.now()
+        self.make_completed_chore(self.bob, completed_at=now, name="Recent 1")
+        self.make_completed_chore(
+            self.bob, completed_at=now - timedelta(days=1), name="Recent 2"
+        )
+        for i in range(3):
+            self.make_completed_chore(
+                self.bob, completed_at=now - timedelta(days=8 + i), name=f"Stale {i}"
+            )
+
+        evaluate_achievements(self.bob)
+
+        self.assertFalse(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="On a Roll"
+            ).exists()
+        )
+
+    # -- Point Milestone ------------------------------------------------
+
+    def test_point_milestone_awarded_at_threshold(self):
+        PointEvent.objects.create(
+            member=self.bob,
+            kind=PointEvent.Kind.MANUAL_ADJUSTMENT,
+            points=POINT_MILESTONE_THRESHOLD,
+            reason="Big bonus",
+            created_by=self.alice,
+        )
+
+        evaluate_achievements(self.bob)
+
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="Point Milestone"
+            ).exists()
+        )
+
+    def test_point_milestone_not_awarded_below_threshold(self):
+        PointEvent.objects.create(
+            member=self.bob,
+            kind=PointEvent.Kind.MANUAL_ADJUSTMENT,
+            points=POINT_MILESTONE_THRESHOLD - 1,
+            reason="Almost there",
+            created_by=self.alice,
+        )
+
+        evaluate_achievements(self.bob)
+
+        self.assertFalse(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="Point Milestone"
+            ).exists()
+        )
+
+    # -- Awarding is a pure badge; idempotent re-triggering ----------------
+
+    def test_awarding_does_not_change_point_total(self):
+        self.make_completed_chore(self.bob)
+        total_before = current_point_total(self.bob)
+
+        evaluate_achievements(self.bob)
+
+        self.assertEqual(current_point_total(self.bob), total_before)
+
+    def test_reevaluating_an_already_earned_achievement_is_a_noop(self):
+        self.make_completed_chore(self.bob)
+        evaluate_achievements(self.bob)
+        self.assertEqual(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="First Chore"
+            ).count(),
+            1,
+        )
+
+        # Re-triggering the same condition later (another completion) must
+        # not error (unique_together(member, achievement)) or duplicate.
+        self.make_completed_chore(self.bob)
+        evaluate_achievements(self.bob)
+
+        self.assertEqual(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="First Chore"
+            ).count(),
+            1,
+        )
+
+    def test_evaluate_is_a_noop_when_achievement_row_is_missing(self):
+        Achievement.objects.filter(name="First Chore").delete()
+        self.make_completed_chore(self.bob)
+
+        evaluate_achievements(self.bob)
+
+        self.assertFalse(
+            MemberAchievement.objects.filter(achievement__name="First Chore").exists()
+        )
+
+
+class ChoreCompleteAchievementIntegrationTests(TestCase):
+    """#8: achievements are evaluated right after chore completion via the
+    `chore_complete` view (#4) — not via a poll/scheduler."""
+
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def complete(self, chore):
+        self.client.force_login(self.bob)
+        return self.client.post(reverse("chore_complete", args=[chore.id]))
+
+    def test_first_completion_awards_first_chore_badge(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+
+        self.complete(chore)
+
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="First Chore"
+            ).exists()
+        )
+
+    def test_fifth_completion_within_a_week_awards_on_a_roll_badge(self):
+        for i in range(ON_A_ROLL_COUNT):
+            chore = Chore.objects.create(
+                household=self.household,
+                name=f"Chore {i}",
+                points=5,
+                due_date=timezone.localdate(),
+                status=Chore.Status.ASSIGNED,
+                assigned_to=self.bob,
+            )
+            self.complete(chore)
+
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="On a Roll"
+            ).exists()
+        )
+
+    def test_completion_does_not_award_on_a_roll_before_the_fifth(self):
+        for i in range(ON_A_ROLL_COUNT - 1):
+            chore = Chore.objects.create(
+                household=self.household,
+                name=f"Chore {i}",
+                points=5,
+                due_date=timezone.localdate(),
+                status=Chore.Status.ASSIGNED,
+                assigned_to=self.bob,
+            )
+            self.complete(chore)
+
+        self.assertFalse(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="On a Roll"
+            ).exists()
+        )
+
+
+class PointChangeAchievementIntegrationTests(TestCase):
+    """#8: achievements are re-evaluated right after a point change via #5's
+    `chore_review_adjust` and #6's `adjust_points` — not via a poll."""
+
+    def setUp(self):
+        self.alice = create_user("alice")  # owner
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def test_direct_owner_adjustment_crossing_threshold_awards_point_milestone(self):
+        self.client.force_login(self.alice)
+        self.client.post(
+            reverse("adjust_points", args=[self.bob.id]),
+            {"amount": POINT_MILESTONE_THRESHOLD, "reason": "Big bonus"},
+        )
+
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="Point Milestone"
+            ).exists()
+        )
+
+    def test_direct_owner_adjustment_below_threshold_does_not_award(self):
+        self.client.force_login(self.alice)
+        self.client.post(
+            reverse("adjust_points", args=[self.bob.id]),
+            {"amount": POINT_MILESTONE_THRESHOLD - 1, "reason": "Almost there"},
+        )
+
+        self.assertFalse(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="Point Milestone"
+            ).exists()
+        )
+
+    def test_review_adjustment_crossing_threshold_awards_point_milestone(self):
+        # Completion alone (80 pts) stays below the 100-pt threshold; the
+        # +20 review adjustment (within the +/-40 cap for an 80-pt chore)
+        # is what pushes the member's total to exactly 100.
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Big job",
+            points=80,
+            due_date=timezone.localdate(),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        self.client.force_login(self.bob)
+        self.client.post(reverse("chore_complete", args=[chore.id]))
+        self.assertFalse(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="Point Milestone"
+            ).exists()
+        )
+
+        self.client.force_login(self.alice)
+        self.client.post(
+            reverse("chore_review_adjust", args=[chore.id]),
+            {"delta": 20, "reason": "Extra thorough"},
+        )
+
+        self.assertEqual(current_point_total(self.bob), 100)
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=self.bob, achievement__name="Point Milestone"
+            ).exists()
+        )
+
+
+class MembersViewAchievementDisplayTests(TestCase):
+    """#8: earned achievements are visible in the UI (members page), with
+    what was earned and when (`awarded_at`)."""
+
+    def test_earned_achievement_shown_with_description_and_award_date(self):
+        alice = create_user("alice")
+        create_household_with_owner(alice)
+        achievement = Achievement.objects.get(name="First Chore")
+        earned = MemberAchievement.objects.create(member=alice, achievement=achievement)
+
+        self.client.force_login(alice)
+        response = self.client.get(reverse("members"))
+
+        self.assertContains(response, "First Chore")
+        self.assertContains(response, achievement.description)
+        self.assertContains(response, earned.awarded_at.strftime("%Y-%m-%d"))
+
+    def test_member_with_no_achievements_shows_no_achievements_section(self):
+        alice = create_user("alice")
+        create_household_with_owner(alice)
+
+        self.client.force_login(alice)
+        response = self.client.get(reverse("members"))
+
+        self.assertNotContains(response, "Achievements:")
+
+
+class RemovedMemberKeepsAchievementsTests(TestCase):
+    """#8, §2: a removed member keeps their earned `MemberAchievement`
+    rows — removal must not delete or hide them."""
+
+    def test_removed_member_keeps_earned_achievements(self):
+        alice = create_user("alice")
+        household = create_household_with_owner(alice)
+        bob = create_user("bob")
+        add_member(household, bob)
+        achievement = Achievement.objects.get(name="First Chore")
+        MemberAchievement.objects.create(member=bob, achievement=achievement)
+
+        self.client.force_login(alice)
+        self.client.post(reverse("remove_member", args=[bob.id]))
+
+        self.assertTrue(
+            MemberAchievement.objects.filter(
+                member=bob, achievement__name="First Chore"
+            ).exists()
+        )

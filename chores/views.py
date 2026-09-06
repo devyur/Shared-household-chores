@@ -14,10 +14,12 @@ from .models import (
     Chore,
     Claim,
     Household,
+    MemberAchievement,
     Membership,
     PointEvent,
     chores_completed_on,
     current_point_total,
+    evaluate_achievements,
     generate_invite_code,
     monthly_point_total,
     week_bounds,
@@ -154,6 +156,10 @@ def members(request):
         m.point_adjustments = PointEvent.objects.filter(
             member=m.user, kind=PointEvent.Kind.MANUAL_ADJUSTMENT
         ).order_by("-created_at")
+        # Earned badges (#8) — what and when (`awarded_at`), newest first.
+        m.earned_achievements = MemberAchievement.objects.filter(
+            member=m.user
+        ).select_related("achievement").order_by("-awarded_at")
     return render(
         request,
         "chores/members.html",
@@ -319,6 +325,10 @@ def adjust_points(request, user_id):
             f"({reason})."
         ),
     )
+    # A direct owner adjustment changes the member's lifetime point total,
+    # so re-evaluate achievements (#8) here too.
+    evaluate_achievements(target_user)
+
     messages.success(
         request, f"Adjusted {target_user}'s points by {amount:+d}."
     )
@@ -491,6 +501,11 @@ def chore_review_adjust(request, chore_id):
             f"'{chore.name}' by {delta:+d} ({reason})."
         ),
     )
+    # A review adjustment changes the member's lifetime point total, so
+    # re-evaluate achievements (#8) here too — e.g. this adjustment could be
+    # what pushes them past the "Point Milestone" threshold.
+    evaluate_achievements(chore.assigned_to)
+
     messages.success(
         request, f"Adjusted {chore.assigned_to}'s points by {delta:+d}."
     )
@@ -708,6 +723,11 @@ def chore_complete(request, chore_id):
     # Recurring next-occurrence creation is #1's hook — called, not
     # reimplemented.
     chore.create_next_occurrence()
+
+    # Evaluated right after the triggering event (#8), not via a poll:
+    # awards any newly-met achievement (e.g. "First Chore", "On a Roll") as
+    # a badge only — no point effect.
+    evaluate_achievements(chore.assigned_to)
 
     messages.success(
         request, f"'{chore.name}' marked complete — you earned {chore.points} points."

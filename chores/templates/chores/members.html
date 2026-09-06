@@ -39,6 +39,14 @@
         {% endfor %}
         </ul>
         {% endif %}
+        {% if m.earned_achievements %}
+        <br>Achievements:
+        <ul>
+        {% for earned in m.earned_achievements %}
+            <li>🏅 {{ earned.achievement.name }} — {{ earned.achievement.description }} (earned {{ earned.awarded_at|date:"Y-m-d H:i" }})</li>
+        {% endfor %}
+        </ul>
+        {% endif %}
     </li>
 {% endfor %}
 </ul>
