@@ -70,10 +70,30 @@ def home(request):
         members = household.memberships.filter(
             removed_at__isnull=True
         ).select_related("user")
+        # "Due today" reminder (#10, §12): every non-deleted, non-completed
+        # chore whose due_date is today, household-wide regardless of status
+        # (open or assigned) or who it's assigned to (§14) — not just chores
+        # assigned to the viewer. This is the only notification MVP builds;
+        # no claim/assignment/completion/point-change notifications and no
+        # email (§12, §16, §18). The full dashboard layout is #11's job —
+        # this just gets the reminder onto the existing home page.
+        due_today_chores = (
+            household.chores.filter(
+                due_date=timezone.localdate(), deleted_at__isnull=True
+            )
+            .exclude(status=Chore.Status.COMPLETED)
+            .select_related("assigned_to")
+            .order_by("name")
+        )
         return render(
             request,
             "chores/home.html",
-            {"household": household, "membership": membership, "members": members},
+            {
+                "household": household,
+                "membership": membership,
+                "members": members,
+                "due_today_chores": due_today_chores,
+            },
         )
     if get_household():
         return redirect("household_join")

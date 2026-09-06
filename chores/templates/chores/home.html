@@ -4,6 +4,20 @@
 <h1>{{ household.name }}</h1>
 <p>You are {% if membership.role == "owner" %}the owner{% else %}a member{% endif %}.</p>
 
+{% if due_today_chores %}
+<section id="due-today">
+    <h2>Due Today</h2>
+    <ul>
+    {% for chore in due_today_chores %}
+        <li>
+            {{ chore.name }} ({{ chore.points }} pts)
+            {% if chore.assigned_to %}&mdash; assigned to {{ chore.assigned_to.username }}{% else %}&mdash; open{% endif %}
+        </li>
+    {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
 <h2>Members</h2>
 <ul>
 {% for m in members %}

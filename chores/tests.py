@@ -744,6 +744,115 @@ class HomeViewRedirectTests(TestCase):
         self.assertContains(response, household.name)
 
 
+class HomeViewDueTodayTests(TestCase):
+    """Home page "due today" reminder (#10, §12).
+
+    Household-wide visibility (§14): a chore due today shows up regardless
+    of status (open or assigned) or who it's assigned to, as long as it
+    isn't completed or deleted — not filtered to the viewer's own chores.
+    """
+
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+        self.today = timezone.localdate()
+
+    def test_open_chore_due_today_is_shown(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Vacuum living room",
+            points=10,
+            due_date=self.today,
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, "Vacuum living room")
+        self.assertIn(chore, response.context["due_today_chores"])
+
+    def test_chore_assigned_to_another_member_is_still_shown(self):
+        # Household-wide, not just the viewer's own — alice sees a chore
+        # due today even though it's assigned to bob, not her.
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Take out trash",
+            points=5,
+            due_date=self.today,
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, "Take out trash")
+        self.assertIn(chore, response.context["due_today_chores"])
+
+    def test_completed_chore_due_today_is_excluded(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Wash dishes",
+            points=5,
+            due_date=self.today,
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.bob,
+            completed_at=timezone.now(),
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertNotContains(response, "Wash dishes")
+        self.assertNotIn(chore, response.context["due_today_chores"])
+
+    def test_deleted_chore_due_today_is_excluded(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Mow lawn",
+            points=15,
+            due_date=self.today,
+            deleted_at=timezone.now(),
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertNotContains(response, "Mow lawn")
+        self.assertNotIn(chore, response.context["due_today_chores"])
+
+    def test_chore_due_on_a_different_day_is_excluded(self):
+        past_chore = Chore.objects.create(
+            household=self.household,
+            name="Yesterday's chore",
+            points=5,
+            due_date=self.today - timedelta(days=1),
+        )
+        future_chore = Chore.objects.create(
+            household=self.household,
+            name="Tomorrow's chore",
+            points=5,
+            due_date=self.today + timedelta(days=1),
+        )
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        due_today = response.context["due_today_chores"]
+        self.assertNotIn(past_chore, due_today)
+        self.assertNotIn(future_chore, due_today)
+
+    def test_no_chores_due_today_renders_without_due_today_section(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'id="due-today"')
+
+
 class MembersViewTests(TestCase):
     def test_is_owner_flag_true_for_owner_false_for_member(self):
         alice = create_user("alice")
