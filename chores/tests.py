@@ -14,6 +14,7 @@ from .models import (
     PointEvent,
     RecurrenceRule,
     current_point_total,
+    failure_penalty_points,
 )
 
 STRONG_PASSWORD = "aVeryStrongPass1!"
@@ -1133,3 +1134,386 @@ class ChoreUnclaimViewTests(TestCase):
         self.assertTrue(
             Claim.objects.filter(chore=self.chore, member=self.bob).exists()
         )
+
+
+class FailurePenaltyPointsTests(TestCase):
+    def test_even_points_halve_exactly(self):
+        self.assertEqual(failure_penalty_points(20), 10)
+
+    def test_odd_points_round_half_up(self):
+        # 15 * 0.5 = 7.5 -> rounds up to 8, not down to 7.
+        self.assertEqual(failure_penalty_points(15), 8)
+        self.assertEqual(failure_penalty_points(21), 11)
+        self.assertEqual(failure_penalty_points(1), 1)
+
+    def test_zero_points_has_zero_penalty(self):
+        self.assertEqual(failure_penalty_points(0), 0)
+
+
+class ChoreFailOverdueTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        self.carol = create_user("carol")
+        add_member(self.household, self.bob)
+        add_member(self.household, self.carol)
+
+    def make_chore(self, **overrides):
+        defaults = dict(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate() - timedelta(days=1),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        defaults.update(overrides)
+        return Chore.objects.create(**defaults)
+
+    def run_fail_overdue(self):
+        self.household.chores.filter(deleted_at__isnull=True).fail_overdue()
+
+    def test_overdue_assigned_chore_is_reopened_and_unassigned(self):
+        chore = self.make_chore()
+
+        self.run_fail_overdue()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+        self.assertIsNone(chore.assigned_to)
+
+    def test_penalty_point_event_is_created_for_former_assignee(self):
+        chore = self.make_chore(points=15)
+
+        self.run_fail_overdue()
+
+        event = PointEvent.objects.get(chore=chore, kind=PointEvent.Kind.FAILURE_PENALTY)
+        self.assertEqual(event.member, self.bob)
+        self.assertEqual(event.points, -8)  # round-half-up(15 * 0.5) == 8
+
+    def test_penalty_can_take_points_negative(self):
+        chore = self.make_chore(points=20)
+
+        self.run_fail_overdue()
+
+        self.assertEqual(current_point_total(self.bob), -10)
+
+    def test_failure_is_logged_with_no_actor(self):
+        chore = self.make_chore()
+
+        self.run_fail_overdue()
+
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_FAILED,
+                chore=chore,
+                actor__isnull=True,
+                member=self.bob,
+            ).exists()
+        )
+
+    def test_prior_claims_are_cleared_on_failure(self):
+        chore = self.make_chore()
+        Claim.objects.create(chore=chore, member=self.bob)
+        Claim.objects.create(chore=chore, member=self.carol)
+
+        self.run_fail_overdue()
+
+        self.assertEqual(chore.claims.count(), 0)
+
+    def test_open_chore_past_due_is_left_alone(self):
+        chore = self.make_chore(status=Chore.Status.OPEN, assigned_to=None)
+        Claim.objects.create(chore=chore, member=self.bob)
+
+        self.run_fail_overdue()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+        self.assertFalse(
+            PointEvent.objects.filter(chore=chore, kind=PointEvent.Kind.FAILURE_PENALTY).exists()
+        )
+
+    def test_completed_chore_past_due_is_never_touched(self):
+        chore = self.make_chore(
+            status=Chore.Status.COMPLETED, completed_at=timezone.now()
+        )
+
+        self.run_fail_overdue()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.COMPLETED)
+        self.assertFalse(
+            PointEvent.objects.filter(chore=chore, kind=PointEvent.Kind.FAILURE_PENALTY).exists()
+        )
+
+    def test_assigned_chore_due_today_is_not_yet_failed(self):
+        chore = self.make_chore(due_date=timezone.localdate())
+
+        self.run_fail_overdue()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.ASSIGNED)
+
+    def test_assigned_chore_due_in_future_is_not_failed(self):
+        chore = self.make_chore(due_date=timezone.localdate() + timedelta(days=3))
+
+        self.run_fail_overdue()
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.ASSIGNED)
+
+    def test_reevaluating_an_already_reopened_chore_does_not_repenalize(self):
+        chore = self.make_chore()
+
+        self.run_fail_overdue()
+        self.run_fail_overdue()
+
+        self.assertEqual(
+            PointEvent.objects.filter(
+                chore=chore, kind=PointEvent.Kind.FAILURE_PENALTY
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            ActivityLog.objects.filter(
+                chore=chore, action=ActivityLog.Action.CHORE_FAILED
+            ).count(),
+            1,
+        )
+
+    def test_multiple_overdue_chores_are_each_failed_independently(self):
+        chore1 = self.make_chore(name="Chore one")
+        chore2 = self.make_chore(name="Chore two", assigned_to=self.carol)
+
+        self.run_fail_overdue()
+
+        chore1.refresh_from_db()
+        chore2.refresh_from_db()
+        self.assertEqual(chore1.status, Chore.Status.OPEN)
+        self.assertEqual(chore2.status, Chore.Status.OPEN)
+        self.assertEqual(
+            PointEvent.objects.filter(kind=PointEvent.Kind.FAILURE_PENALTY).count(), 2
+        )
+
+
+class ChoreListLazyEvalOrderingTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        add_member(self.household, self.bob)
+
+    def test_visiting_chore_list_fails_overdue_assigned_chores(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate() - timedelta(days=1),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+        self.client.force_login(self.alice)
+
+        self.client.get(reverse("chore_list"))
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.OPEN)
+        self.assertIsNone(chore.assigned_to)
+        self.assertEqual(current_point_total(self.bob), -10)
+
+    def test_a_chore_auto_assigned_this_pass_is_not_failed_in_the_same_pass(self):
+        # due_date is already in the past, so both fail_overdue() and
+        # auto_assign_due() are eligible to act on it in the same request.
+        # fail_overdue() must run first (see chore_list) so this chore -
+        # which starts OPEN with a claim, and only becomes ASSIGNED partway
+        # through this same request via auto_assign_due() - is not
+        # immediately failed afterwards in the same pass.
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate() - timedelta(days=1),
+        )
+        Claim.objects.create(chore=chore, member=self.bob)
+        self.client.force_login(self.alice)
+
+        self.client.get(reverse("chore_list"))
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.ASSIGNED)
+        self.assertEqual(chore.assigned_to, self.bob)
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=chore, kind=PointEvent.Kind.FAILURE_PENALTY
+            ).exists()
+        )
+
+    def test_completed_chore_survives_a_lazy_eval_pass_untouched(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate() - timedelta(days=1),
+            status=Chore.Status.COMPLETED,
+            assigned_to=self.bob,
+            completed_at=timezone.now(),
+        )
+        self.client.force_login(self.alice)
+
+        self.client.get(reverse("chore_list"))
+
+        chore.refresh_from_db()
+        self.assertEqual(chore.status, Chore.Status.COMPLETED)
+        self.assertEqual(chore.assigned_to, self.bob)
+
+
+class ChoreCompleteViewTests(TestCase):
+    def setUp(self):
+        self.alice = create_user("alice")
+        self.household = create_household_with_owner(self.alice)
+        self.bob = create_user("bob")
+        self.carol = create_user("carol")
+        add_member(self.household, self.bob)
+        add_member(self.household, self.carol)
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            points=20,
+            due_date=timezone.localdate(),
+            status=Chore.Status.ASSIGNED,
+            assigned_to=self.bob,
+        )
+
+    def test_assignee_can_mark_complete_and_it_is_logged(self):
+        self.client.force_login(self.bob)
+
+        response = self.client.post(
+            reverse("chore_complete", args=[self.chore.id]), follow=True
+        )
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.COMPLETED)
+        self.assertIsNotNone(self.chore.completed_at)
+        self.assertRedirects(response, reverse("chore_list"))
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                household=self.household,
+                action=ActivityLog.Action.CHORE_COMPLETED,
+                chore=self.chore,
+                actor=self.bob,
+                member=self.bob,
+            ).exists()
+        )
+
+    def test_completion_awards_full_points_with_24h_review_deadline(self):
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_complete", args=[self.chore.id]))
+
+        self.chore.refresh_from_db()
+        event = PointEvent.objects.get(chore=self.chore, kind=PointEvent.Kind.COMPLETION)
+        self.assertEqual(event.member, self.bob)
+        self.assertEqual(event.points, 20)
+        self.assertEqual(event.created_by, self.bob)
+        self.assertEqual(event.review_deadline, self.chore.completed_at + timedelta(hours=24))
+
+    def test_non_assignee_cannot_mark_complete(self):
+        self.client.force_login(self.carol)
+
+        self.client.post(reverse("chore_complete", args=[self.chore.id]), follow=True)
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.ASSIGNED)
+        self.assertFalse(
+            PointEvent.objects.filter(chore=self.chore, kind=PointEvent.Kind.COMPLETION).exists()
+        )
+
+    def test_chore_not_in_assigned_status_cannot_be_completed(self):
+        self.chore.status = Chore.Status.OPEN
+        self.chore.assigned_to = None
+        self.chore.save()
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_complete", args=[self.chore.id]), follow=True)
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.OPEN)
+
+    def test_get_request_does_not_complete(self):
+        self.client.force_login(self.bob)
+
+        self.client.get(reverse("chore_complete", args=[self.chore.id]))
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.ASSIGNED)
+
+    def test_completing_late_before_failure_eval_still_awards_full_points(self):
+        self.chore.due_date = timezone.localdate() - timedelta(days=5)
+        self.chore.save()
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_complete", args=[self.chore.id]))
+
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.COMPLETED)
+        event = PointEvent.objects.get(chore=self.chore, kind=PointEvent.Kind.COMPLETION)
+        self.assertEqual(event.points, 20)
+        self.assertFalse(
+            PointEvent.objects.filter(
+                chore=self.chore, kind=PointEvent.Kind.FAILURE_PENALTY
+            ).exists()
+        )
+
+    def test_completing_a_recurring_chore_creates_next_occurrence(self):
+        self.chore.is_recurring = True
+        self.chore.save()
+        RecurrenceRule.objects.create(
+            chore=self.chore, rule_type=RecurrenceRule.RuleType.CALENDAR, interval_days=7
+        )
+        self.client.force_login(self.bob)
+
+        self.client.post(reverse("chore_complete", args=[self.chore.id]))
+
+        self.assertEqual(Chore.objects.count(), 2)
+        self.assertTrue(
+            Chore.objects.filter(name=self.chore.name, status=Chore.Status.OPEN).exists()
+        )
+
+    def test_complete_button_shown_only_to_assignee_of_assigned_chore(self):
+        self.client.force_login(self.bob)
+        response = self.client.get(reverse("chore_list"))
+        self.assertContains(
+            response, f'action="{reverse("chore_complete", args=[self.chore.id])}"'
+        )
+
+        self.client.force_login(self.carol)
+        response = self.client.get(reverse("chore_list"))
+        self.assertNotContains(
+            response, f'action="{reverse("chore_complete", args=[self.chore.id])}"'
+        )
+
+    def test_complete_button_hidden_once_chore_is_no_longer_assigned(self):
+        self.chore.status = Chore.Status.OPEN
+        self.chore.assigned_to = None
+        self.chore.save()
+        self.client.force_login(self.bob)
+
+        response = self.client.get(reverse("chore_list"))
+
+        self.assertNotContains(
+            response, f'action="{reverse("chore_complete", args=[self.chore.id])}"'
+        )
+
+    def test_user_without_membership_cannot_complete(self):
+        outsider = create_user("dave")
+        self.client.force_login(outsider)
+
+        response = self.client.post(reverse("chore_complete", args=[self.chore.id]))
+
+        self.assertRedirects(
+            response, reverse("home"), fetch_redirect_response=False
+        )
+        self.chore.refresh_from_db()
+        self.assertEqual(self.chore.status, Chore.Status.ASSIGNED)

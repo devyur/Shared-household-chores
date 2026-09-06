@@ -71,6 +71,85 @@ class RecurrenceRule(models.Model):
 
 
 class ChoreQuerySet(models.QuerySet):
+    def due_for_failure(self):
+        """ASSIGNED chores in this queryset whose due date has passed."""
+        return self.filter(
+            status=Chore.Status.ASSIGNED, due_date__lt=timezone.localdate()
+        )
+
+    def fail_overdue(self):
+        """Lazily fail chores that are still ASSIGNED past their due date (#4,
+        §8, §17.7, §17.8).
+
+        Evaluated on read, same convention as `auto_assign_due()` below.
+        Called from `chore_list` *before* `auto_assign_due()` in the same
+        request: failure must be resolved for chores that were ASSIGNED
+        under a *previous* lazy-eval pass before this pass potentially
+        assigns other, unrelated OPEN chores. Running it in the other order
+        would let a chore that `auto_assign_due()` *just* assigned this same
+        pass (whose due date, by definition, has already arrived) be
+        immediately failed by this method in the same request, before its
+        new assignee ever had a chance.
+
+        Only `assigned` chores past due are touched (§17.7) — an `open`
+        chore past due is #3's "stays available" case and is left alone,
+        and a `completed` chore is never matched by this queryset's
+        `status=ASSIGNED` filter, so a chore actually completed (even late,
+        even in the gap before this method next runs) is never touched.
+
+        For each matching chore: it is reopened (`status=open`,
+        `assigned_to=None`), its prior claims are deleted (see module-level
+        note below on why), and a `PointEvent` (kind=`failure_penalty`,
+        points=-round-half-up(chore.points * 0.5)) is recorded against the
+        former assignee — the running total may go negative (§8, §17.8).
+
+        Idempotent: once reopened, a chore's status is `open`, so it no
+        longer matches this queryset and re-evaluating it is a no-op — no
+        double penalty, no duplicate log entry.
+        """
+        overdue_chores = self.due_for_failure()
+        for chore in overdue_chores:
+            assignee = chore.assigned_to
+            chore.assigned_to = None
+            chore.status = Chore.Status.OPEN
+            chore.save(update_fields=["assigned_to", "status"])
+
+            # Prior claims are deleted, not kept, on failure. Rationale: the
+            # chore's `due_date` doesn't change on reopening, so if claims
+            # survived, the very next lazy-eval call in this same request
+            # (`auto_assign_due()`, which runs right after this method) would
+            # see an OPEN, due, claimed chore and immediately reassign it —
+            # right back into `assigned` status with the same past due date,
+            # ready to be failed again on the *next* page load. That would
+            # turn one missed due date into a runaway per-request penalty
+            # loop. Deleting claims here means `auto_assign_due()` sees zero
+            # claims and correctly leaves the chore open/unassigned (its
+            # documented behaviour), matching §17.5 ("claims last until the
+            # due date") — the due date has now passed and the chore has
+            # failed, so those claims have already served their purpose.
+            # Members who still want it re-claim it fresh.
+            chore.claims.all().delete()
+
+            penalty = failure_penalty_points(chore.points)
+            PointEvent.objects.create(
+                member=assignee,
+                chore=chore,
+                kind=PointEvent.Kind.FAILURE_PENALTY,
+                points=-penalty,
+            )
+            ActivityLog.objects.create(
+                household=chore.household,
+                actor=None,
+                action=ActivityLog.Action.CHORE_FAILED,
+                chore=chore,
+                member=assignee,
+                description=(
+                    f"'{chore.name}' was not completed by its due date; it "
+                    f"reopened for claiming and {assignee} lost {penalty} "
+                    f"points (50% of {chore.points}, rounded half-up)."
+                ),
+            )
+
     def due_for_auto_assignment(self):
         """OPEN chores in this queryset whose due date has arrived."""
         return self.filter(
@@ -281,6 +360,21 @@ class PointEvent(models.Model):
 
     def __str__(self):
         return f"{self.member} {self.points:+d} ({self.kind})"
+
+
+def failure_penalty_points(points):
+    """The failure penalty for a chore worth `points`: 50% of its point
+    value, rounded half-up (#4, §8, §17.7).
+
+    Round-half-up (rather than Python's default `round()`, which is
+    round-half-to-even/banker's rounding) since an odd chore point value
+    doesn't halve evenly and the issue calls for round-half-up explicitly.
+    Implemented as integer arithmetic (`(points + 1) // 2`) rather than
+    float math to sidestep floating-point rounding entirely: for a
+    non-negative integer `points`, `(points + 1) // 2` is exactly
+    `points / 2` rounded half-up (e.g. 20 -> 10, 15 -> 8, 21 -> 11).
+    """
+    return (points + 1) // 2
 
 
 def current_point_total(member):

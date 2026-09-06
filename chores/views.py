@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
@@ -6,7 +8,15 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
 from .forms import ChoreForm, HouseholdCreateForm, HouseholdJoinForm, SignUpForm
-from .models import ActivityLog, Chore, Claim, Household, Membership, generate_invite_code
+from .models import (
+    ActivityLog,
+    Chore,
+    Claim,
+    Household,
+    Membership,
+    PointEvent,
+    generate_invite_code,
+)
 
 
 def get_household():
@@ -187,15 +197,26 @@ def chore_list(request):
     membership = get_active_membership(request.user)
     if not membership:
         return redirect("home")
-    # Lazy-eval hook (#3, §5): auto-assign any due, claimed, still-open
-    # chores before rendering the list — no scheduler involved.
-    membership.household.chores.filter(deleted_at__isnull=True).auto_assign_due()
+    # Lazy-eval hooks, no scheduler involved. Order matters: fail_overdue()
+    # (#4, §8) must run *before* auto_assign_due() (#3, §5) so that a chore
+    # auto-assigned during *this same* call (whose due date has, by
+    # definition, just arrived) is never immediately failed in the same
+    # pass, before its new assignee had any chance. fail_overdue() only
+    # ever matches `assigned` chores, so a chore that's actually
+    # `completed` is never touched by it regardless of ordering.
+    household_chores = membership.household.chores.filter(deleted_at__isnull=True)
+    household_chores.fail_overdue()
+    household_chores.auto_assign_due()
     chores = membership.household.chores.filter(
         deleted_at__isnull=True
     ).prefetch_related("claims__member")
     for chore in chores:
         chore.user_has_claimed = any(
             claim.member_id == request.user.id for claim in chore.claims.all()
+        )
+        chore.user_is_assignee = (
+            chore.status == Chore.Status.ASSIGNED
+            and chore.assigned_to_id == request.user.id
         )
     return render(
         request,
@@ -359,6 +380,66 @@ def chore_unclaim(request, chore_id):
     deleted_count, _ = Claim.objects.filter(chore=chore, member=request.user).delete()
     if deleted_count:
         messages.success(request, f"You withdrew your claim on '{chore.name}'.")
+    return redirect("chore_list")
+
+
+@login_required
+def chore_complete(request, chore_id):
+    membership = get_active_membership(request.user)
+    if not membership:
+        return redirect("home")
+    if request.method != "POST":
+        return redirect("chore_list")
+
+    chore = get_object_or_404(
+        Chore,
+        id=chore_id,
+        household=membership.household,
+        deleted_at__isnull=True,
+    )
+    # Only the current assignee, and only while assigned (#4). This mirrors
+    # the "no action at all" gating in chore_list.html: the button is only
+    # rendered for the assignee on an `assigned` chore, but the view enforces
+    # it independently since a POST could be crafted directly.
+    if chore.status != Chore.Status.ASSIGNED or chore.assigned_to_id != request.user.id:
+        messages.error(request, f"You can't mark '{chore.name}' complete right now.")
+        return redirect("chore_list")
+
+    now = timezone.now()
+    chore.status = Chore.Status.COMPLETED
+    chore.completed_at = now
+    chore.save(update_fields=["status", "completed_at"])
+
+    # No automatic late-completion penalty (§16): full points are awarded
+    # here regardless of whether `due_date` has already passed, as long as
+    # fail_overdue() hasn't reopened the chore first — and it can't have,
+    # since that requires `status == assigned` to already be false.
+    PointEvent.objects.create(
+        member=chore.assigned_to,
+        chore=chore,
+        kind=PointEvent.Kind.COMPLETION,
+        points=chore.points,
+        created_by=request.user,
+        review_deadline=now + timedelta(hours=24),
+    )
+    ActivityLog.objects.create(
+        household=membership.household,
+        actor=request.user,
+        action=ActivityLog.Action.CHORE_COMPLETED,
+        chore=chore,
+        member=chore.assigned_to,
+        description=(
+            f"{request.user} completed '{chore.name}' and earned "
+            f"{chore.points} points."
+        ),
+    )
+    # Recurring next-occurrence creation is #1's hook — called, not
+    # reimplemented.
+    chore.create_next_occurrence()
+
+    messages.success(
+        request, f"'{chore.name}' marked complete — you earned {chore.points} points."
+    )
     return redirect("chore_list")
 
 

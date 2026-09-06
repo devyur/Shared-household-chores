@@ -14,6 +14,9 @@ urlpatterns = [
     path("chores/<int:chore_id>/delete/", views.chore_delete, name="chore_delete"),
     path("chores/<int:chore_id>/claim/", views.chore_claim, name="chore_claim"),
     path("chores/<int:chore_id>/unclaim/", views.chore_unclaim, name="chore_unclaim"),
+    path(
+        "chores/<int:chore_id>/complete/", views.chore_complete, name="chore_complete"
+    ),
     path("chores/archive/", views.chore_archive, name="chore_archive"),
     path(
         "household/members/<int:user_id>/remove/",

@@ -32,6 +32,16 @@
                 </form>
             {% endif %}
         {% endif %}
+        {% if chore.status == "assigned" %}
+            Assigned to: {{ chore.assigned_to }}
+            {% if chore.user_is_assignee %}
+                <form method="post" action="{% url 'chore_complete' chore.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <button type="submit">Mark complete</button>
+                </form>
+            {% endif %}
+            <br>
+        {% endif %}
         <a href="{% url 'chore_edit' chore.id %}">Edit</a>
         <form method="post" action="{% url 'chore_delete' chore.id %}" style="display:inline">
             {% csrf_token %}
